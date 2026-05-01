@@ -1,0 +1,66 @@
+📉 Customer Churn Prediction 📊
+
+📌 Overview
+The Telco Customer Churn dataset contains information about customers of a telecom company, including
+their demographics, services subscribed, account details, and billing information.
+
+The goal of this project is to predict whether a customer will churn (leave the service) or not, enabling
+businesses to take proactive retention measures.
+
+📊 Dataset
+Source: Kaggle Telco Customer Churn Dataset
+Total Records: 7043 customers
+
+Features include:
+Customer demographics (gender, senior citizen, etc.)
+Service details (internet service, phone service, etc.)
+Account information (tenure, contract type)
+Billing details (monthly charges, total charges)
+
+⚙️ Approach
+🔹 Data Cleaning:
+Handled missing values in TotalCharges
+Converted data types where required
+Encoded categorical variables into numerical format
+🔹 Exploratory Data Analysis:
+Analyzed churn patterns based on:
+Tenure
+Monthly Charges
+Contract Type
+Identified key trends and relationships influencing churn
+🔹 Feature Selection:
+Selected relevant features impacting churn behavior
+Removed unnecessary or redundant columns
+🔹 Models Used:
+Logistic Regression
+Random Forest
+
+📈 Results
+Logistic Regression Accuracy: 77.8%
+Random Forest Accuracy: 75.7%
+Logistic Regression performed better overall in terms of accuracy and produced fewer false positives.
+Random Forest slightly improved detection of churn cases (true positives).
+
+🔍 Key Insights
+Customers with low tenure are more likely to churn
+Customers with higher monthly charges show higher churn rates
+Long-term customers tend to stay due to loyalty and switching costs
+High-risk segment identified: low tenure + high monthly charges
+
+🚀 Future Improvements
+Apply feature scaling for better model performance
+Handle class imbalance using techniques like class weights or resampling
+Use advanced evaluation metrics (Precision, Recall, F1-score, ROC-AUC)
+Implement cross-validation for robust evaluation
+
+🛠️ Tech Stack
+Python
+Pandas, NumPy
+Matplotlib, Seaborn
+Scikit-learn
+
+🎯 Conclusion
+
+This project demonstrates how machine learning can be used to identify customers at risk of churn. By
+leveraging key features such as tenure and monthly charges, businesses can design targeted retention
+strategies to reduce customer loss and improve long-term profitability.
