@@ -67,48 +67,82 @@ strategies to reduce customer loss and improve long-term profitability.
 
 
 
-from pool.Entire_Run import runMR
 import pandas as pd
+import numpy as np
+import glob
+from pool.multiprocessingMethods import checkNightViewing, updateNightViewing
+from datetime import datetime
 
-weeks = [['W'+str(week), 'Week '+str(week), date] for week, date in zip(range(46, 49), [date.strftime('%Y%m%d') for date in pd.date_range('20201114', freq='7D', periods=9)])]
-for weekList in weeks:
-    week = weekList[:2]
-    #writer = pd.ExcelWriter("/home/niranjan.zalake/Downloads/metarules/"+week[1]+" comparison.xlsx",engine='xlsxwriter')
-    weekData = []
-    for date in [date.strftime("%Y%m%d") for date in pd.date_range(start=pd.to_datetime(weekList[2]), periods=7, freq='D')]:
-        weekDir = 'C:\\Users\\niranjan.zalake\\Downloads\\metarules\\'+week[1]+"\\"
-        dir = 'C:\\Users\\niranjan.zalake\\Downloads\\metarules\\'+week[1]+"\\"+date+'\\'
-        stochasticConfigPath="C:\\Users\\niranjan.zalake\\Downloads\\metarules\\config\\stochastic_config_noTamp.csv"
-        madConfigPath="C:\\Users\\niranjan.zalake\\Downloads\\metarules\\config\\madb_config_noTamp.csv"
-        nicheConfigPath = "C:\\Users\\niranjan.zalake\\Downloads\\metarules\\config\\niche_channel_config.csv"
-        tamperedConfigPath = "C:\\Users\\niranjan.zalake\\Downloads\\metarules\\config\\tampered_channel_config_noTamp.csv"
-        #stochasticConfigPath = "/home/niranjan.zalake/Downloads/metarules/config/stochastic_config.csv"
-        #madConfigPath = "/home/niranjan.zalake/Downloads/metarules/config/madb_config.csv"
-        #nicheConfigPath = "/home/niranjan.zalake/Downloads/metarules/config/niche_channel_config.csv"
-        #tamperedConfigPath = "/home/niranjan.zalake/Downloads/metarules/config/tampered_channel_config.csv"
-        defaultBval = 0.85
-        historyDataDate = date
-        config="PROD"
-        hcConfig = 'PROD'
-        finalChannelList = "\\Final List Of Channels 09 November 2020.xlsx"
+def hygieneCheck(dir, config, currDate, weekDir):
+    print("Hygiene Check processing started..")
+    statementFile = pd.read_csv(dir + "statement_r0.csv")
+    malafideHH = pd.read_csv(weekDir + "malafide_hh.csv")
+    tvDetails = pd.read_csv(dir+"hhTVStatus.csv", index_col=False)
+    demoFile = pd.read_csv(dir + "demographics.csv")
+    demoFile['KEY'] = demoFile['HOUSEHOLD'].astype(str) + " " + demoFile['INDIVIDUAL_ID'].astype(str)
+    demoFile = demoFile[~demoFile['Education'].isna()]['KEY'].unique()
+    tvDetails = tvDetails[(tvDetails['TSN']==1) & (~tvDetails['T7_7'].isna())].drop_duplicates(subset='WID')['WID'].unique()
+    townVillageMaster = pd.read_excel(dir + "townVillageCodeMaster.xlsx")
+    townVillageMaster['Town_Village'] = townVillageMaster['Town_Village'].apply(lambda x:x.upper())
+    townVillageMaster = townVillageMaster['Town_Village'].unique()
 
-        finalStatement, statementExt = runMR(dir, finalChannelList, stochasticConfigPath, madConfigPath, nicheConfigPath, tamperedConfigPath, defaultBval, historyDataDate, weekDir, config, hcConfig)
-        finalStatement.to_csv("C:\\Users\\niranjan.zalake\\Downloads\\metarules\\"+week[1]+"\\"+date+"_statement.csv", index=False)
-        #finalStatement = pd.read_csv(weekDir+date+"_statement.csv")
-        '''
-        comparison = createComparison(tamperedConfigPath, finalChannelList, "/Filesharedata/Released_Data/R1/2020/"+week[0]+"/Demography_Statements/"+date+"/Run_4/Statements/"+date+"_statement.csv", dir, finalStatement, weekDir)
-    
-        comparison.to_excel(writer, sheet_name=date)
-        comparison['DATE'] = date
-        weekData.append(comparison)
-        print(date)
-    
-    weekData = pd.concat(weekData)
-    weekData = weekData.groupby(['CHANNEL', 'NAME', 'GENRE', 'TAMPERED']).agg(r0_Dur=('r0_Dur', 'sum'), r1_Dur=('r1_Dur', 'sum'), r1_Test_Dur=('r1_Test_Dur', 'sum')).reset_index()
-    weekData['test_clip'] = (weekData['r1_Test_Dur'] - weekData['r0_Dur']) / weekData['r0_Dur']
-    weekData['r1_clip'] = (weekData['r1_Dur'] - weekData['r0_Dur']) / weekData['r0_Dur']
-    weekData.to_excel(writer, sheet_name=week[1])
-    writer.save()
-    '''
+    hhFile = pd.read_csv(dir + "hhStatus.csv", index_col=False)
+    hhFile['TOWNVILLAGECODE'] = hhFile['TOWNVILLAGECODE'].apply(lambda x:x.upper())
+    hhFile = hhFile[hhFile['TOWNVILLAGECODE'].isin(townVillageMaster)]['WID'].unique()
 
-"\\\\10.10.2.51\\Released_Data\\R0\\2020\\W41\\20201010\\20201010_statement.csv".split("\\")[7]
+    statementFile['KEY'] = statementFile['HOUSEHOLD'].astype(str) + " " + statementFile['INDIVIDUAL'].astype(str)
+    statementFile['END'] = statementFile['START'] + statementFile['DURATION']
+    currDate = pd.to_datetime(currDate)
+    currDate = datetime.strftime(currDate, "%d-%b-%y").upper()
+    for dir in glob.glob("C:\\Users\\niranjan.zalake\\Downloads\\metarules\\bucketing\\**\\HH_BUCKETING_STATUS_*",recursive=True):
+        if currDate in dir:
+            print(dir)
+            bucketing = pd.read_csv(dir)
+
+    statementFile = statementFile[~statementFile['HOUSEHOLD'].isin(malafideHH['HHID'].unique())]
+
+    bucketing['UPDATE_DATE'] = pd.to_datetime(bucketing['UPDATE_DATE'])
+    bucketing.sort_values(by='UPDATE_DATE', inplace=True, ascending=False)
+    bucketing.drop_duplicates(subset=['HOUSEHOLD_ID'], keep='first', inplace=True)
+    useBucket = bucketing[(bucketing['CURRENT_STATUS'] == 'USE')]['HOUSEHOLD_ID'].unique().tolist()
+
+    # including only use bucket HHs
+    statementFile = statementFile[(statementFile['HOUSEHOLD'].isin(useBucket)) & (statementFile['HOUSEHOLD'].isin(tvDetails)) & (statementFile['HOUSEHOLD'].isin(hhFile))]
+    # individuals with less than 30 seconds of viewing per day to be removed
+    LT30SInd = statementFile[['KEY', 'DURATION']].groupby(by='KEY')['DURATION'].sum().apply(lambda x: x if x < 30 else np.nan).dropna().reset_index()['KEY'].tolist()
+
+    # individuals with greater than 16 hours of viewing per day to be removed
+    GT16HInd = statementFile[['KEY', 'DURATION']].groupby(by='KEY')['DURATION'].sum().apply(lambda x: x if x > 57600 else np.nan).dropna().reset_index()['KEY'].tolist()
+
+    GT9HInd = statementFile[statementFile['DURATION'] > 32400]['KEY'].unique().tolist()
+
+    UpdatedStatement = statementFile[(~statementFile['KEY'].isin(GT16HInd)) & (~statementFile['KEY'].isin(LT30SInd))
+                                     & (~statementFile['KEY'].isin(GT9HInd)) & (statementFile['KEY'].isin(demoFile))]
+
+    # Continuous viewing not more than 3 hours during 2am-6am
+    if config=='PROD':
+        GT3NHInd = UpdatedStatement[(UpdatedStatement['START'] > 7200) & (UpdatedStatement['START'] < 21600) & (UpdatedStatement['DURATION'] > 10800)][['KEY', 'START', 'END', 'DURATION']]
+        GT3NHInd['CHECK_DUR'] = GT3NHInd.apply(lambda x:checkNightViewing(x['START'], x['END'], x['DURATION']), axis=1)
+        GT3NHInd = GT3NHInd[GT3NHInd['CHECK_DUR']>10800]['KEY'].unique().tolist()
+        UpdatedStatement = UpdatedStatement[(~UpdatedStatement['KEY'].isin(GT3NHInd))]
+    else:
+        GT3NHInd = UpdatedStatement[(UpdatedStatement['START'] > 7200) & (UpdatedStatement['START'] < 21600) & (UpdatedStatement['DURATION'] > 7200)]
+        GT3NHInd['CHECK_DUR'] = GT3NHInd.apply(lambda x:checkNightViewing(x['START'], x['END'], x['DURATION']), axis=1)
+        GT3NHInd['NEW_DUR'] = GT3NHInd.apply(lambda x:updateNightViewing(x['START'], x['END'], 'DUR', x['DURATION']) if x['CHECK_DUR']>7200 else x['DURATION'], axis=1)
+        GT3NHInd['NEW_START'] = GT3NHInd.apply(lambda x: updateNightViewing(x['START'], x['END'], '-1', x['DURATION']) if x['CHECK_DUR'] > 7200 else x['DURATION'], axis=1)
+        UpdatedStatement.loc[GT3NHInd.index, 'DURATION'] = GT3NHInd['NEW_DUR'].tolist()
+        UpdatedStatement.loc[GT3NHInd.index, 'START'] = GT3NHInd['NEW_START'].tolist()
+
+    UpdatedStatement.sort_values(by=['CHANNEL', 'KEY'], inplace=True)
+    UpdatedStatement.reset_index(inplace=True)
+
+    # Continuous viewing not more than 3 hours during 2am-6am
+    #nightViewing = UpdatedStatement[(UpdatedStatement['START'] > 7200) & (UpdatedStatement['END'] < 21600) & (UpdatedStatement['DURATION'] < 10800)]
+
+    #UpdatedStatement = UpdatedStatement[~((UpdatedStatement['START'] > 7200) & (UpdatedStatement['END'] < 21600))]
+    #UpdatedStatement = pd.concat([UpdatedStatement, nightViewing])
+
+    # UpdatedStatement.to_csv(dir + "statement_hc_done.csv", index=False)
+    # UpdatedStatement = UpdatedStatement[(UpdatedStatement['CHANNEL'].isin([1010413]))]
+    print("Hygiene Check processing complete.")
+    return UpdatedStatement
