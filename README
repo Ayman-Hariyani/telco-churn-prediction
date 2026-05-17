@@ -67,313 +67,48 @@ strategies to reduce customer loss and improve long-term profitability.
 
 
 
+from pool.Entire_Run import runMR
 import pandas as pd
-import numpy as np
-import time
-import datetime
-from multiprocessing import Pool, cpu_count
-from pool.multiprocessingMethods import getDurComp, checkDayPartsPresent, calcOutlierMADVer2, stateGroupMapping, prev12DData, assignStochastic, \
-    readChannelConfig, assignMAD, assignMADUpdated, assignStochasticUpdated, clipDuration, getDurCompGenre, channelLevel2Process, channelLevel3Process, \
-    parallelizeMADCalc, genreLevel2Process, genrelLevel3Process, calcOutlierMAD, extendStatement, mergeAndCreateFinalStatement, assignStochasticVer2, newChannelSegStochasticMadAssign
-from pool.hygiene_check import hygieneCheck
-import functools
-from kmodes.kmodes import KModes
-import warnings
-warnings.filterwarnings("ignore")
 
-def runMR(dir, finalChannelList, stochasticConfigPath, madConfigPath, nicheConfigPath, tamperedConfigPath, defaultBval, historyDataDate, weekDir, config="UPDATED", hcConfig='PROD'):
-    print("######################################################CONFIG######################################################")
-    print("Running MR Process for date: "+historyDataDate)
-    print("Reading R0 statment from: "+dir)
-    print("Stochastic Config read from: "+stochasticConfigPath)
-    print("MAD Config read from: " + madConfigPath)
-    print("Tampered Config read from: " + tamperedConfigPath)
-    print("Niche Config read from: " + nicheConfigPath)
-    print("Default MAD value used is: "+str(defaultBval))
-    print("Channel data read from: " + weekDir+finalChannelList)
-    print("Config process is "+config)
-    print("HC config process is " + config)
-    print("##################################################################################################################")
-    statementR0 = hygieneCheck(dir, hcConfig, historyDataDate, weekDir)
-    print(str(datetime.datetime.now()) + ": Pre-processing statement data and reading configs started..")
-    demoFile = pd.read_csv(dir+"demographics.csv")
-    demoFile['KEY'] = demoFile['HOUSEHOLD'].astype(str) + " " + demoFile['INDIVIDUAL_ID'].astype(str)
-    hhFile = pd.read_csv(dir+"hhStatus.csv", index_col=False)
-    channelGenre,exemptChannels = readChannelConfig(dir=weekDir)
+weeks = [['W'+str(week), 'Week '+str(week), date] for week, date in zip(range(46, 49), [date.strftime('%Y%m%d') for date in pd.date_range('20201114', freq='7D', periods=9)])]
+for weekList in weeks:
+    week = weekList[:2]
+    #writer = pd.ExcelWriter("/home/niranjan.zalake/Downloads/metarules/"+week[1]+" comparison.xlsx",engine='xlsxwriter')
+    weekData = []
+    for date in [date.strftime("%Y%m%d") for date in pd.date_range(start=pd.to_datetime(weekList[2]), periods=7, freq='D')]:
+        weekDir = 'C:\\Users\\niranjan.zalake\\Downloads\\metarules\\'+week[1]+"\\"
+        dir = 'C:\\Users\\niranjan.zalake\\Downloads\\metarules\\'+week[1]+"\\"+date+'\\'
+        stochasticConfigPath="C:\\Users\\niranjan.zalake\\Downloads\\metarules\\config\\stochastic_config_noTamp.csv"
+        madConfigPath="C:\\Users\\niranjan.zalake\\Downloads\\metarules\\config\\madb_config_noTamp.csv"
+        nicheConfigPath = "C:\\Users\\niranjan.zalake\\Downloads\\metarules\\config\\niche_channel_config.csv"
+        tamperedConfigPath = "C:\\Users\\niranjan.zalake\\Downloads\\metarules\\config\\tampered_channel_config_noTamp.csv"
+        #stochasticConfigPath = "/home/niranjan.zalake/Downloads/metarules/config/stochastic_config.csv"
+        #madConfigPath = "/home/niranjan.zalake/Downloads/metarules/config/madb_config.csv"
+        #nicheConfigPath = "/home/niranjan.zalake/Downloads/metarules/config/niche_channel_config.csv"
+        #tamperedConfigPath = "/home/niranjan.zalake/Downloads/metarules/config/tampered_channel_config.csv"
+        defaultBval = 0.85
+        historyDataDate = date
+        config="PROD"
+        hcConfig = 'PROD'
+        finalChannelList = "\\Final List Of Channels 09 November 2020.xlsx"
 
-    dayPartsDict = pd.read_csv("R:\MSCI_Team\MSCI_Intern_2026\Ayman\Metarule\metarules\dayparts").to_dict(orient='index')
+        finalStatement, statementExt = runMR(dir, finalChannelList, stochasticConfigPath, madConfigPath, nicheConfigPath, tamperedConfigPath, defaultBval, historyDataDate, weekDir, config, hcConfig)
+        finalStatement.to_csv("C:\\Users\\niranjan.zalake\\Downloads\\metarules\\"+week[1]+"\\"+date+"_statement.csv", index=False)
+        #finalStatement = pd.read_csv(weekDir+date+"_statement.csv")
+        '''
+        comparison = createComparison(tamperedConfigPath, finalChannelList, "/Filesharedata/Released_Data/R1/2020/"+week[0]+"/Demography_Statements/"+date+"/Run_4/Statements/"+date+"_statement.csv", dir, finalStatement, weekDir)
+    
+        comparison.to_excel(writer, sheet_name=date)
+        comparison['DATE'] = date
+        weekData.append(comparison)
+        print(date)
+    
+    weekData = pd.concat(weekData)
+    weekData = weekData.groupby(['CHANNEL', 'NAME', 'GENRE', 'TAMPERED']).agg(r0_Dur=('r0_Dur', 'sum'), r1_Dur=('r1_Dur', 'sum'), r1_Test_Dur=('r1_Test_Dur', 'sum')).reset_index()
+    weekData['test_clip'] = (weekData['r1_Test_Dur'] - weekData['r0_Dur']) / weekData['r0_Dur']
+    weekData['r1_clip'] = (weekData['r1_Dur'] - weekData['r0_Dur']) / weekData['r0_Dur']
+    weekData.to_excel(writer, sheet_name=week[1])
+    writer.save()
+    '''
 
-    dayParts = {'DAYPART':[], 'START':[], 'END':[], 'dp':[]}
-    numOfDayParts = []
-    for start, end in zip(list(statementR0['START']), list(statementR0['END'])):
-        tempDf = checkDayPartsPresent(start, end, dayPartsDict)
-        dayParts['DAYPART'].extend(tempDf['name'])
-        dayParts['dp'].extend(tempDf['dp'])
-        dayParts['START'].extend(tempDf['from'])
-        dayParts['END'].extend(tempDf['to'])
-        numOfDayParts.append(len(tempDf['name']))
-
-    statementR0.drop(['index', 'END', 'START', 'DURATION'], inplace=True, axis=1)
-    statementR0['OG_INDEX'] = statementR0.index
-    statementR0 = statementR0.loc[statementR0.index.repeat(pd.Series(numOfDayParts))]
-    statementR0.reset_index(inplace=True, drop=True)
-    statementR0 = pd.concat([statementR0, pd.DataFrame(dayParts)], axis=1)
-    statementR0['DURATION'] = statementR0['END'].astype(int) - statementR0['START'].astype(int)
-
-    statementFile = statementR0.groupby(by=['CHANNEL', 'HOUSEHOLD', 'INDIVIDUAL', 'TVSET', 'DAYPART', 'dp']).agg({'DURATION': 'sum', 'OG_INDEX': lambda x: ' '.join([str(item) for item in x]),
-                                                                               'KEY':'first', 'PLATFORM':'first', 'START':'first', 'END':'last'}).reset_index()
-    #hhFile = stateGroupMapping(hhFile)
-    print(str(datetime.datetime.now())+": Pre-processing statement data complete.")
-    if config=='-1':
-        ########
-        statementFile = newChannelSegStochasticMadAssign(statementFile, weekDir, finalChannelList)
-        #######
-
-    print(str(datetime.datetime.now())+": Reading history data started..")
-    historyData = prev12DData(dayPartsDict, historyDataDate)
-    #historyData.to_csv(dir+"historyData.csv", index=False)
-
-    #historyData = pd.read_csv(dir+"historyData.csv")
-    historyDataUse = historyData.copy()
-    print(str(datetime.datetime.now())+": Reading history data complete.")
-
-    print(str(datetime.datetime.now())+": Channel level 1 process started..")
-    #statementFile = statementFile.groupby(by=['CHANNEL', 'KEY', 'DAYPART']).agg({'DURATION':'sum', 'START':'first', 'END':'last'}).reset_index()
-    statementFile['DURATIONLIST'] = np.repeat(0, len(statementFile))
-
-    startTime = time.time()
-    p = Pool(cpu_count() - 3)
-    for i, channel in enumerate(statementFile['CHANNEL'].value_counts().index):
-        consideredDataChannel = statementFile[statementFile['CHANNEL'].values == channel]
-        historyDataChannel = historyDataUse[historyDataUse['CHANNEL'].isin([channel])]
-
-        durDF = pd.DataFrame()
-        inds = sorted(consideredDataChannel['KEY'].unique())
-        durDF = durDF.append(p.map(functools.partial(getDurComp, historyDataChannel=historyDataChannel, consideredDataChannel=consideredDataChannel), enumerate(inds)))
-
-        statementFile.loc[durDF['index'], 'DURATIONLIST'] = np.array(durDF['durList'])
-
-        if i%100==0:
-            print(i, channel, time.time()-startTime)
-    p.close()
-    p.join()
-    print(time.time() - startTime)
-
-    stochasticConfig = pd.read_csv(stochasticConfigPath, skiprows=1, names=['Day', 'Daypart', 'CHANNEL', 'STATE', 'detailed_town_class', 'CHANNELNAME', 'NEW_GENRE', 'PROBABILITY', 'Comments/Description'])
-    madConfig = pd.read_csv(madConfigPath, skiprows=1, names=['Day', 'Daypart', 'CHANNEL', 'STATE', 'detailed_town_class', 'CHANNELNAME', 'NEW_GENRE', 'b Value', 'Comments/Description'])
-    nicheConfig = pd.read_csv(nicheConfigPath, encoding='latin')['Channel Code'].tolist()
-    tamperedConfig = pd.read_csv(tamperedConfigPath, encoding='latin')['Channel Code'].tolist()
-    #tamperedConfig = pd.read_excel("/home/niranjan.zalake/Downloads/metarules/config/Channel Segmentation/tamperedList.xlsx",sheet_name='final')
-
-    stateGroupCode = {2: 'UP/UTK', 3: 'Rajasthan', 4: 'DELHI', 5: 'North East / Sikkim', 8: 'Orissa', 9: 'West Bengal', 12: 'GUJ/DNH',
-                      13: 'MH/GOA', 14: 'Andhra Pradesh', 15: 'Karnataka', 16: 'Kerala', 23: 'Tamilnadu/Pondicherry', 18: 'Bihar & Jharkhand',
-                      19: 'Madhya Pradesh & Chhattisgarh', 20: 'Pun / Cha', 21: 'Har / HP / J&K', 22: 'Tamilnadu/Pondicherry', 17: 'Tamilnadu/Pondicherry'}
-    statementFile = pd.merge(left=statementFile, right=demoFile[['HOUSEHOLD', 'detailed_town_class', 'state_group']].drop_duplicates(subset=['HOUSEHOLD']),on='HOUSEHOLD', how='left')
-    statementFile['STATE'] = statementFile['state_group'].map(stateGroupCode)
-    notRequiredDPs = ['2-2:30d', '2:30-3d', '3-3:30d', '3:30-4d', '4-4:30d', '4:30-5d', '5-5:30d', '5:30-6d']
-    if config=='UPDATED':
-        uniqueCases = statementFile[['STATE', 'CHANNEL']].drop_duplicates(subset=['STATE', 'CHANNEL']).reset_index(drop=True)
-        statementFile = pd.merge(left=statementFile, right=assignMADUpdated(uniqueCases, madConfig, defaultBval), on=['STATE', 'CHANNEL'], how='left')
-        uniqueCases = statementFile[['STATE', 'CHANNEL']].drop_duplicates(subset=['STATE', 'CHANNEL']).reset_index(drop=True)
-        statementFile = pd.merge(left=statementFile, right=assignStochasticUpdated(uniqueCases, stochasticConfig, exemptChannels), on=['STATE', 'CHANNEL'], how='left')
-    elif config=='PROD':
-        uniqueCases = statementFile[['STATE', 'detailed_town_class','CHANNEL']].drop_duplicates(subset=['STATE', 'detailed_town_class', 'CHANNEL']).reset_index(drop=True)
-        statementFile = pd.merge(left=statementFile, right=assignMAD(uniqueCases, madConfig, defaultBval), on=['STATE', 'detailed_town_class', 'CHANNEL'], how='left')
-        uniqueCases = statementFile[['STATE', 'detailed_town_class','CHANNEL']].drop_duplicates(subset=['STATE', 'detailed_town_class', 'CHANNEL']).reset_index(drop=True)
-        statementFile = pd.merge(left=statementFile, right=assignStochastic(uniqueCases, stochasticConfig, exemptChannels), on=['STATE', 'detailed_town_class', 'CHANNEL'], how='left')
-
-    if config!='-1':
-        statementFile.loc[statementFile['DAYPART'].isin(notRequiredDPs), 'PROBABILITY'] = 0.25
-
-    data = parallelizeMADCalc(statementFile, 8, tamperedConfig)
-    statementFile.loc[data['index'], 'MADOUTLIER_LV1'] = data['mad']
-
-    statementFile['STOCHASTIC'] = list(np.random.rand(len(statementFile)))
-
-    statementFile['OUTLIER_LV1'] = 'N'
-    tempStatement = statementFile.loc[statementFile['MADOUTLIER_LV1'].values!='PASS',:]
-    statementFile.loc[statementFile['MADOUTLIER_LV1'].values!='PASS', 'OUTLIER_LV1'] = np.where(tempStatement['DURATION']>=tempStatement['MADOUTLIER_LV1'].astype(float), 'Y', 'N').tolist()
-
-    statementFile.drop(['STATE', 'state_group', 'DURATIONLIST', 'detailed_town_class'], axis=1, inplace=True)
-    print(str(datetime.datetime.now())+": Channel level 1 complete.")
-    ################################################################################################################################################################################################
-    print(str(datetime.datetime.now())+": Channel level 2 process started..")
-
-    demoFile = pd.merge(left=demoFile, right=hhFile[['WID', 'T4MA', 'T9Q17B_2']], left_on='HOUSEHOLD', right_on='WID', how='left')
-
-    required_cols = ['detailed_town_class', 'Detailed_NCCS', 'Age_RLD', 'Sex', 'T4MA', 'T9Q17B_2']
-    p = Pool(cpu_count() - 3)
-    madDict = p.map(functools.partial(channelLevel2Process, required_cols=required_cols, demoFile=demoFile, statementFile=statementFile),demoFile['state_group'].unique())
-    p.close()
-    p.join()
-    df1 = pd.DataFrame()
-    df2 = pd.DataFrame()
-    for data in madDict:
-        df1=df1.append(data[0])
-        df2=df2.append(data[1])
-    demoFile.loc[df2['index'], 'clusters'] = df2['cluster'].tolist()
-
-    statementFile = pd.merge(left=statementFile, right=demoFile[['state_group', 'clusters', 'KEY']], on='KEY', how='left')
-    statementFile = pd.merge(left=statementFile, right=df1, on=['CHANNEL', 'state_group', 'clusters', 'DAYPART'], how='left')
-
-    statementFile['OUTLIER_LV2'] = 'N'
-    tempStatement = statementFile.loc[(statementFile['OUTLIER_LV1'].values=='N') & (statementFile['MADOUTLIER_LV2'].values!='PASS'), :]
-    statementFile.loc[(statementFile['OUTLIER_LV1'].values=='N') & (statementFile['MADOUTLIER_LV2'].values!='PASS'), 'OUTLIER_LV2'] = np.where(
-        (tempStatement['DURATION']>=tempStatement['MADOUTLIER_LV2'].astype(float)), 'Y', 'N').tolist()
-
-    tempStatement = statementFile.loc[(statementFile['OUTLIER_LV1'].values=='Y') & (statementFile['MADOUTLIER_LV2'].values!='PASS'), :]
-    statementFile.loc[(statementFile['OUTLIER_LV1'].values=='Y') & (statementFile['MADOUTLIER_LV2'].values!='PASS'), 'OUTLIER_LV2'] = np.where(
-        (tempStatement['DURATION']>=tempStatement['MADOUTLIER_LV2'].astype(float)), 'Y', 'N').tolist()
-
-    print(str(datetime.datetime.now())+": Channel level 2 complete.")
-    ################################################################################################################################################################################################
-    print(str(datetime.datetime.now())+": Channel level 3 process started..")
-    madDict = pd.DataFrame()
-    p = Pool(2)
-    madDict = madDict.append(p.map(functools.partial(channelLevel3Process, statementFile=statementFile, historyDataUse=historyDataUse),statementFile['state_group'].unique()))
-    p.close()
-    p.join()
-
-    statementFile = pd.merge(left=statementFile, right=madDict, on=['CHANNEL', 'state_group', 'clusters', 'DAYPART'], how='left')
-
-    statementFile['OUTLIER_LV3'] = 'N'
-    tempStatement = statementFile.loc[(statementFile['OUTLIER_LV2'].values=='N') & (statementFile['MADOUTLIER_LV3'].values!='PASS'), :]
-    statementFile.loc[(statementFile['OUTLIER_LV2'].values=='N') & (statementFile['MADOUTLIER_LV3'].values!='PASS'), 'OUTLIER_LV3'] = np.where(
-        (tempStatement['CG_DUR_LV2']>=tempStatement['MADOUTLIER_LV3'].astype(float)) , 'Y', 'N').tolist()
-
-    statementFile['FINAL_OUTLIER'] = np.repeat(-1, len(statementFile))
-    statementFile.loc[(statementFile['OUTLIER_LV1']=='Y') & (statementFile['OUTLIER_LV2']=='Y') & (~statementFile['CHANNEL'].isin(nicheConfig)), 'FINAL_OUTLIER'] = 'LV2'
-    statementFile.loc[(statementFile['OUTLIER_LV1']=='Y') & (statementFile['OUTLIER_LV2']=='N') & (statementFile['OUTLIER_LV3']=='N'), 'FINAL_OUTLIER'] = 'LV3'
-    statementFile.loc[(statementFile['OUTLIER_LV1']=='Y') & (statementFile['OUTLIER_LV2']=='N') & (statementFile['OUTLIER_LV3']=='Y') & (statementFile['CHANNEL'].isin(tamperedConfig)), 'FINAL_OUTLIER'] = 'LV3'
-
-    print(str(datetime.datetime.now())+": Channel level 3 complete.")
-    ################################################################################################################################################################################################
-    print(str(datetime.datetime.now())+": Genre level 1 process started..")
-    demoFile = pd.read_csv(dir+"demographics.csv")
-    demoFile['KEY'] = demoFile['HOUSEHOLD'].astype(str) + " " + demoFile['INDIVIDUAL_ID'].astype(str)
-
-    channelGenre.rename(columns={'Channel Codes':'CHANNEL', 'Genre':'GENRE'}, inplace=True)
-
-    statementFile = pd.merge(left=statementFile, right=channelGenre[['CHANNEL', 'GENRE']], on='CHANNEL', how='left')
-
-    condition1 = (statementFile['OUTLIER_LV1']=='Y') & (statementFile['OUTLIER_LV2']=='Y') & (statementFile['CHANNEL'].isin(nicheConfig))
-    condition2 = ((statementFile['OUTLIER_LV1']=='N') & (statementFile['OUTLIER_LV2']=='Y'))
-
-    statementFileGenre = statementFile.loc[condition1 | condition2]
-    statementFileGenre = statementFileGenre[['HOUSEHOLD', 'INDIVIDUAL', 'CHANNEL', 'TVSET', 'PLATFORM', 'KEY', 'OG_INDEX', 'DAYPART', 'START', 'END',
-                                             'DURATION', 'PROBABILITY', 'STOCHASTIC', 'state_group', 'clusters', 'GENRE']]
-    replaceIndex = statementFileGenre.index
-
-    #historyData = pd.read_csv(dir+"historyData.csv")
-    historyDataUse = pd.merge(left=historyData, right=channelGenre[['CHANNEL', 'GENRE']], on='CHANNEL', how='left')
-    historyDataUse = historyDataUse.groupby(by=['DATE', 'GENRE', 'KEY', 'DAYPART'])['DURATION'].sum().reset_index()
-
-    statementFileGenre['DURATIONLIST'] = np.repeat(0, len(statementFileGenre))
-
-    p = Pool(cpu_count() - 3)
-    for genre in statementFileGenre['GENRE'].value_counts().index:
-        consideredDataGenre = statementFileGenre[statementFileGenre['GENRE'].values == genre]
-        historyDataGenre = historyDataUse[historyDataUse['GENRE'].isin([genre])]
-
-        startTime = time.time()
-        durDF = pd.DataFrame()
-
-        inds = sorted(consideredDataGenre['KEY'].unique())
-        #print(len(inds))
-        durDF = durDF.append(p.map(functools.partial(getDurCompGenre, historyDataGenre=historyDataGenre, consideredDataGenre=consideredDataGenre), enumerate(inds)))
-        statementFileGenre.loc[durDF['index'], 'DURATIONLIST'] = [durDF['durList']]
-
-        print(genre, time.time()-startTime)
-    p.close()
-    p.join()
-
-    statementFileGenre['MADOUTLIER_LV1'] = statementFileGenre[['DURATIONLIST', 'CHANNEL']].apply(lambda x:calcOutlierMAD(x['DURATIONLIST'], x['CHANNEL'], defaultBval, tamperedConfig), axis=1)
-
-    statementFileGenre['OUTLIER_LV1'] = 'N'
-    tempStatement = statementFileGenre.loc[statementFileGenre['MADOUTLIER_LV1']!='PASS',:]
-    statementFileGenre.loc[statementFileGenre['MADOUTLIER_LV1']!='PASS', 'OUTLIER_LV1'] = np.where(tempStatement['DURATION']>=tempStatement['MADOUTLIER_LV1'].astype(float), 'Y', 'N').tolist()
-
-    statementFileGenre.drop(['DURATIONLIST'], axis=1, inplace=True)
-
-    print(str(datetime.datetime.now())+": Genre level 1 complete.")
-    ################################################################################################################################################################################################
-    print(str(datetime.datetime.now())+": Genre level 2 process started..")
-    statementFileGenre.drop(['state_group', 'clusters'], inplace=True, axis=1)
-
-    demoFile = pd.merge(left=demoFile, right=hhFile[['WID', 'T4MA', 'T9Q17B_2']], left_on='HOUSEHOLD', right_on='WID', how='left')
-    demoFile['state_group_code'] = demoFile['state_group'].map(stateGroupCode)
-    demoFile['KEY'] = demoFile['HOUSEHOLD'].astype(str) + " " + demoFile['INDIVIDUAL_ID'].astype(str)
-
-    required_cols = ['detailed_town_class', 'Detailed_NCCS', 'Age_RLD', 'Sex', 'T4MA', 'T9Q17B_2']
-    p = Pool(cpu_count() - 3)
-    madDict = p.map(functools.partial(genreLevel2Process, required_cols=required_cols, demoFile=demoFile, statementFileGenre=statementFileGenre, defaultBval=defaultBval),demoFile['state_group'].unique())
-    p.close()
-    p.join()
-    df1 = pd.DataFrame()
-    df2 = pd.DataFrame()
-    for data in madDict:
-        df1=df1.append(data[0])
-        df2 = df2.append(data[1])
-    demoFile.loc[df2['index'], 'clusters'] = df2['cluster'].tolist()
-
-    statementFileGenre = pd.merge(left=statementFileGenre, right=demoFile[['state_group', 'clusters', 'KEY']], on='KEY', how='left')
-    statementFileGenre = pd.merge(left=statementFileGenre, right=df1, on=['GENRE', 'state_group', 'clusters', 'DAYPART'], how='left')
-
-    statementFileGenre['OUTLIER_LV2'] = 'N'
-    tempStatement = statementFileGenre.loc[(statementFileGenre['OUTLIER_LV1']=='N') & (statementFileGenre['MADOUTLIER_LV2']!='PASS'), :]
-    statementFileGenre.loc[(statementFileGenre['OUTLIER_LV1']=='N') & (statementFileGenre['MADOUTLIER_LV2']!='PASS'), 'OUTLIER_LV2'] = np.where(
-        (tempStatement['DURATION']>=tempStatement['MADOUTLIER_LV2'].astype(float)), 'Y', 'N').tolist()
-
-    tempStatement = statementFileGenre.loc[(statementFileGenre['OUTLIER_LV1']=='Y') & (statementFileGenre['MADOUTLIER_LV2']!='PASS'), :]
-    statementFileGenre.loc[(statementFileGenre['OUTLIER_LV1']=='Y') & (statementFileGenre['MADOUTLIER_LV2']!='PASS'), 'OUTLIER_LV2'] = np.where(
-        (tempStatement['DURATION']>=tempStatement['MADOUTLIER_LV2'].astype(float)), 'Y', 'N').tolist()
-
-
-    print(str(datetime.datetime.now())+": Genre level 2 complete.")
-    ################################################################################################################################################################################################
-    print(str(datetime.datetime.now())+": Genre level 3 process started..")
-    madDict = pd.DataFrame()
-    p = Pool(cpu_count() - 3)
-    madDict = madDict.append(p.map(functools.partial(genrelLevel3Process, statementFileGenre=statementFileGenre, historyDataUse=historyDataUse, defaultBval=defaultBval),statementFile['state_group'].unique()))
-    p.close()
-    p.join()
-
-    statementFileGenre = pd.merge(left=statementFileGenre, right=madDict, on=['GENRE', 'state_group', 'clusters', 'DAYPART'], how='left')
-
-    statementFileGenre['OUTLIER_LV3'] = 'N'
-    tempStatement = statementFileGenre.loc[(statementFileGenre['OUTLIER_LV2']=='N') & (statementFileGenre['MADOUTLIER_LV3']!='PASS'), :]
-    statementFileGenre.loc[(statementFileGenre['OUTLIER_LV2']=='N') & (statementFileGenre['MADOUTLIER_LV3']!='PASS'), 'OUTLIER_LV3'] = np.where(
-        (tempStatement['CG_DUR_LV2']>=tempStatement['MADOUTLIER_LV3'].astype(float)), 'Y', 'N').tolist()
-
-    statementFileGenre['FINAL_OUTLIER'] = np.repeat(-1, len(statementFileGenre))
-    statementFileGenre.loc[(statementFileGenre['OUTLIER_LV1']=='Y') & (statementFileGenre['OUTLIER_LV2']=='Y'), 'FINAL_OUTLIER'] = 'LV2G'
-    statementFileGenre.loc[(statementFileGenre['OUTLIER_LV1']=='Y') & (statementFileGenre['OUTLIER_LV2']=='N') & (statementFileGenre['OUTLIER_LV3']=='N'), 'FINAL_OUTLIER'] = 'LV3G'
-    statementFileGenre.loc[(statementFileGenre['OUTLIER_LV1']=='Y') & (statementFileGenre['OUTLIER_LV2']=='N') & (statementFileGenre['OUTLIER_LV3']=='Y') & (statementFileGenre['CHANNEL'].isin(tamperedConfig)), 'FINAL_OUTLIER'] = 'LV3G'
-
-    print(str(datetime.datetime.now())+": Genre level 3 complete.")
-    ################################################################################################################################################################################################
-    print(str(datetime.datetime.now())+" :Clipping process started..")
-    req_cols = ['HOUSEHOLD', 'INDIVIDUAL', 'CHANNEL', 'TVSET', 'PLATFORM', 'KEY','OG_INDEX', 'DAYPART', 'START', 'END', 'DURATION',
-                'PROBABILITY', 'STOCHASTIC', 'BVAL', 'MADOUTLIER_LV1', 'OUTLIER_LV1', 'state_group', 'clusters', 'MADOUTLIER_LV2', 'CG_DUR_LV2',
-                'OUTLIER_LV2', 'MADOUTLIER_LV3', 'CG_DUR_LV3', 'OUTLIER_LV3', 'FINAL_OUTLIER', 'NEWDURATION']
-    statementFile.loc[:, 'NEWDURATION'] = statementFile['DURATION']
-    finalStatement = statementFile[req_cols]
-    finalStatement.loc[replaceIndex, req_cols] = statementFileGenre.loc[:, req_cols].set_index(replaceIndex)
-
-    finalStatement.loc[:, 'NEWDURATION'] = finalStatement['DURATION']
-    newDur = []
-    for row in finalStatement[(finalStatement['FINAL_OUTLIER'].isin(['LV1', 'LV2', 'LV3', 'LV1G', 'LV2G', 'LV3G'])) & (finalStatement['STOCHASTIC']>finalStatement['PROBABILITY']) & (finalStatement['MADOUTLIER_LV3']!='PASS')].iterrows():
-        newDur.append(clipDuration(row[1]))
-    finalStatement.loc[(finalStatement['FINAL_OUTLIER'].isin(['LV1', 'LV2', 'LV3', 'LV1G', 'LV2G', 'LV3G'])) & (finalStatement['STOCHASTIC']>finalStatement['PROBABILITY']) & (finalStatement['MADOUTLIER_LV3']!='PASS'), 'NEWDURATION'] = newDur
-    #finalStatement.to_csv("/home/niranjan.zalake/Downloads/metarules/final_MR.csv", index=False)
-    #statementR0.to_csv("/home/niranjan.zalake/Downloads/metarules/r0.csv", index=False)
-
-    statementExt = mergeAndCreateFinalStatement(finalStatement, statementR0)
-
-    #r0statement = pd.read_csv(dir+"statement_r0.csv", index_col=False)
-    #comparison = pd.concat([r0statement.groupby(by='CHANNEL')['DURATION'].sum().reset_index(), statementExt.groupby(by='CHANNEL')['DURATION'].sum().reset_index()], axis=1)
-
-    #comparison.to_csv(dir+"channelComparison.csv")
-
-    print(str(datetime.datetime.now())+": Clipping process complete & comparison is saved at path "+dir+"channelComparison.csv.")
-    return statementExt, finalStatement
+"\\\\10.10.2.51\\Released_Data\\R0\\2020\\W41\\20201010\\20201010_statement.csv".split("\\")[7]
