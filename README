@@ -67,82 +67,177 @@ strategies to reduce customer loss and improve long-term profitability.
 
 
 
-import pandas as pd
 import numpy as np
-import glob
-from pool.multiprocessingMethods import checkNightViewing, updateNightViewing
-from datetime import datetime
+import pandas as pd
 
-def hygieneCheck(dir, config, currDate, weekDir):
-    print("Hygiene Check processing started..")
-    statementFile = pd.read_csv(dir + "statement_r0.csv")
-    malafideHH = pd.read_csv(weekDir + "malafide_hh.csv")
-    tvDetails = pd.read_csv(dir+"hhTVStatus.csv", index_col=False)
-    demoFile = pd.read_csv(dir + "demographics.csv")
-    demoFile['KEY'] = demoFile['HOUSEHOLD'].astype(str) + " " + demoFile['INDIVIDUAL_ID'].astype(str)
-    demoFile = demoFile[~demoFile['Education'].isna()]['KEY'].unique()
-    tvDetails = tvDetails[(tvDetails['TSN']==1) & (~tvDetails['T7_7'].isna())].drop_duplicates(subset='WID')['WID'].unique()
-    townVillageMaster = pd.read_excel(dir + "townVillageCodeMaster.xlsx")
-    townVillageMaster['Town_Village'] = townVillageMaster['Town_Village'].apply(lambda x:x.upper())
-    townVillageMaster = townVillageMaster['Town_Village'].unique()
+stateGroupCode = {2:'UP/UTK', 3:'Rajasthan', 4:'DELHI', 5:'North East / Sikkim', 8:'Orissa',9:'West Bengal', 12:'GUJ/DNH',
+ 13:'MH/GOA', 14:'Andhra Pradesh', 15:'Karnataka', 16:'Kerala', 23:'Tamilnadu/Pondicherry', 18:'Bihar & Jharkhand',
+ 19:'Madhya Pradesh & Chhattisgarh', 20:'Pun / Cha', 21:'Har / HP / J&K', 22:'Tamilnadu/Pondicherry', 17:'Tamilnadu/Pondicherry'}
 
-    hhFile = pd.read_csv(dir + "hhStatus.csv", index_col=False)
-    hhFile['TOWNVILLAGECODE'] = hhFile['TOWNVILLAGECODE'].apply(lambda x:x.upper())
-    hhFile = hhFile[hhFile['TOWNVILLAGECODE'].isin(townVillageMaster)]['WID'].unique()
+config = pd.DataFrame({'clusters':['DEFAULT',1,2,2,3,3,3, 'TAMPERED'],
+              'label':['DEFAULT', 0, 0, 1, 0, 1, 2, 'TAMPERED'],
+              'stochastic':[0.683, 0.997, 0.997, 0.988, 0.997, 0.988, 0.954, 0.1],
+              'mad':[0.866, 0.683, 0.683, 0.954, 0.683, 0.954, 0.997, 0.683]})
 
-    statementFile['KEY'] = statementFile['HOUSEHOLD'].astype(str) + " " + statementFile['INDIVIDUAL'].astype(str)
-    statementFile['END'] = statementFile['START'] + statementFile['DURATION']
-    currDate = pd.to_datetime(currDate)
-    currDate = datetime.strftime(currDate, "%d-%b-%y").upper()
-    for dir in glob.glob("C:\\Users\\niranjan.zalake\\Downloads\\metarules\\bucketing\\**\\HH_BUCKETING_STATUS_*",recursive=True):
-        if currDate in dir:
-            print(dir)
-            bucketing = pd.read_csv(dir)
-
-    statementFile = statementFile[~statementFile['HOUSEHOLD'].isin(malafideHH['HHID'].unique())]
-
-    bucketing['UPDATE_DATE'] = pd.to_datetime(bucketing['UPDATE_DATE'])
-    bucketing.sort_values(by='UPDATE_DATE', inplace=True, ascending=False)
-    bucketing.drop_duplicates(subset=['HOUSEHOLD_ID'], keep='first', inplace=True)
-    useBucket = bucketing[(bucketing['CURRENT_STATUS'] == 'USE')]['HOUSEHOLD_ID'].unique().tolist()
-
-    # including only use bucket HHs
-    statementFile = statementFile[(statementFile['HOUSEHOLD'].isin(useBucket)) & (statementFile['HOUSEHOLD'].isin(tvDetails)) & (statementFile['HOUSEHOLD'].isin(hhFile))]
-    # individuals with less than 30 seconds of viewing per day to be removed
-    LT30SInd = statementFile[['KEY', 'DURATION']].groupby(by='KEY')['DURATION'].sum().apply(lambda x: x if x < 30 else np.nan).dropna().reset_index()['KEY'].tolist()
-
-    # individuals with greater than 16 hours of viewing per day to be removed
-    GT16HInd = statementFile[['KEY', 'DURATION']].groupby(by='KEY')['DURATION'].sum().apply(lambda x: x if x > 57600 else np.nan).dropna().reset_index()['KEY'].tolist()
-
-    GT9HInd = statementFile[statementFile['DURATION'] > 32400]['KEY'].unique().tolist()
-
-    UpdatedStatement = statementFile[(~statementFile['KEY'].isin(GT16HInd)) & (~statementFile['KEY'].isin(LT30SInd))
-                                     & (~statementFile['KEY'].isin(GT9HInd)) & (statementFile['KEY'].isin(demoFile))]
-
-    # Continuous viewing not more than 3 hours during 2am-6am
-    if config=='PROD':
-        GT3NHInd = UpdatedStatement[(UpdatedStatement['START'] > 7200) & (UpdatedStatement['START'] < 21600) & (UpdatedStatement['DURATION'] > 10800)][['KEY', 'START', 'END', 'DURATION']]
-        GT3NHInd['CHECK_DUR'] = GT3NHInd.apply(lambda x:checkNightViewing(x['START'], x['END'], x['DURATION']), axis=1)
-        GT3NHInd = GT3NHInd[GT3NHInd['CHECK_DUR']>10800]['KEY'].unique().tolist()
-        UpdatedStatement = UpdatedStatement[(~UpdatedStatement['KEY'].isin(GT3NHInd))]
+def detailed_nccs_map(x):
+    if x in ['A2', 'B1', 'A1', 'B2', 'A3']:
+        return 1
     else:
-        GT3NHInd = UpdatedStatement[(UpdatedStatement['START'] > 7200) & (UpdatedStatement['START'] < 21600) & (UpdatedStatement['DURATION'] > 7200)]
-        GT3NHInd['CHECK_DUR'] = GT3NHInd.apply(lambda x:checkNightViewing(x['START'], x['END'], x['DURATION']), axis=1)
-        GT3NHInd['NEW_DUR'] = GT3NHInd.apply(lambda x:updateNightViewing(x['START'], x['END'], 'DUR', x['DURATION']) if x['CHECK_DUR']>7200 else x['DURATION'], axis=1)
-        GT3NHInd['NEW_START'] = GT3NHInd.apply(lambda x: updateNightViewing(x['START'], x['END'], '-1', x['DURATION']) if x['CHECK_DUR'] > 7200 else x['DURATION'], axis=1)
-        UpdatedStatement.loc[GT3NHInd.index, 'DURATION'] = GT3NHInd['NEW_DUR'].tolist()
-        UpdatedStatement.loc[GT3NHInd.index, 'START'] = GT3NHInd['NEW_START'].tolist()
+        return 2
 
-    UpdatedStatement.sort_values(by=['CHANNEL', 'KEY'], inplace=True)
-    UpdatedStatement.reset_index(inplace=True)
+def town_class_map(x):
+    if x in ['1 - 10L', 'Below 1L', 'Rural']:
+        return 1
+    elif x in ['10 - 75 L']:
+        return 2
+    elif x in ['Mega City']:
+        return 3
+    else:
+        return 99
 
-    # Continuous viewing not more than 3 hours during 2am-6am
-    #nightViewing = UpdatedStatement[(UpdatedStatement['START'] > 7200) & (UpdatedStatement['END'] < 21600) & (UpdatedStatement['DURATION'] < 10800)]
+stateGroupWiseTCMapping = {'DELHI':{1:'Mega City'},
+                'GUJ/DNH':{2:'10 - 75 L', 3:'Below 10 L', 4:'Rural'},
+                'MH/GOA':{1:'Mega City', 2:'10 - 75 L', 3:'Below 10 L', 4:'Rural'},
+                'Madhya Pradesh & Chhattisgarh':{2:'10 - 75 L', 3:'Below 10 L', 4:'Rural'},
+                'UP/UTK':{2:'10 - 75 L', 3:'Below 10 L', 4:'Rural'},
+                'West Bengal':{1:'Mega City', 2:'Below 75 L', 3:'Below 75 L', 4:'Rural'},
+                'Andhra Pradesh':{1:'Mega City', 2:'Below 75 L', 3:'Below 75 L', 4:'Rural'},
+                'Orissa':{2:'Urban', 3:'Urban', 4:'Rural'},
+                'Har / HP / J&K':{2:'Urban', 3:'Urban', 4:'Rural'},
+                'Pun / Cha':{2:'Urban', 3:'Urban', 4:'Rural'},
+                'Rajasthan':{2:'Urban', 3:'Urban', 4:'Rural'},
+                'Bihar & Jharkhand':{2:'Urban', 3:'Urban', 4:'Rural'},
+                'North East / Sikkim':{2:'Urban', 3:'Urban', 4:'Rural'},
+                'Karnataka':{1:'Mega City', 3:'Below 10 L', 4:'Rural'},
+                'Tamilnadu/Pondicherry':{1:'Mega City', 2:'Below 75 L', 3:'Below 75 L', 4:'Rural'},
+                'Kerala':{2:'10 - 75 L', 3:'Below 10 L', 4:'Rural'}}
 
-    #UpdatedStatement = UpdatedStatement[~((UpdatedStatement['START'] > 7200) & (UpdatedStatement['END'] < 21600))]
-    #UpdatedStatement = pd.concat([UpdatedStatement, nightViewing])
+groupedChannel = {'Sony MAX':['Sony MAX Tamil','Sony MAX Telugu'],
+                  'Sony Max HD':['Sony Max HD Tamil', 'Sony Max HD Telugu'],
+                  'Animal Planet':['Animal Planet English', 'Animal Planet Tamil'],
+                  'Animal Planet HD World':['Animal Planet HD World Hindi', 'Animal Planet HD World Tamil'],
+                  'Cartoon Network':['Cartoon Network English', 'Cartoon Network Tamil', 'Cartoon Network Telugu'],
+                  'CN HD+': ['CN HD+ English', 'CN HD+ Tamil', 'CN HD+ Telugu'],
+                  'Discovery Channel':['Discovery Channel Malayalam','Discovery Channel Telugu','Discovery Tamil','Discovery Channel Tamil', 'Discovery Channel English','Discovery Channel Bengali','Discovery Channel Telugu' 'Discovery Channel Malayalam','Discovery Channel Kannada','Discovery Channel Marathi'],
+                  'Discovery HD World':[ 'Discovery HD World Hindi','Discovery HD World Tamil','Discovery HD World Telugu',  'Discovery HD World Malayalam','Discovery HD World Kannada','Discovery HD World Marathi','Discovery HD World Bengali'],
+                  'Discovery Kids':[ 'Discovery Kids Hindi','Discovery Kids Tamil','Discovery Kids Telugu', 'Discovery Kids Kannada','Discovery Kids Malayalam'],
+                  'Discovery Science':[ 'Discovery Science Hindi'],
+                  'Discovery Turbo':[],
+                  'Investigation Discovery':['Investigation Discovery English'],
+                  'Investigation Discovery HD':['Investigation Discovery HD English'],
+                  'Disney Channel':['Disney Channel Hindi','Disney Channel Tamil','Disney Channel Telugu'],
+                  'Disney Junior':['Disney Junior Hindi','Disney Junior Tamil','Disney Junior Telugu'],
+                  'Fox Life':['Fox Life Hindi','Fox Life Bengali','Fox Life Tamil'],
+                  'Fox Life HD':['Fox Life HD - Hindi','Fox Life HD - Bangla','Fox Life HD - Tamil'],
+                  'FYI TV18':['FYI TV18 Hindi','FYI TV18 Tamil','FYI TV18 Telugu'],
+                  'FYI TV18 HD':['FYI TV18 HD Hindi','FYI TV18 HD Tamil','FYI TV18 HD Telugu'],
+                  'History TV 18':['History TV 18 Hindi','History TV 18 Tamil','History TV 18 Telugu'],
+                  'History TV 18 HD':['History TV 18 HD Hindi','History TV 18 HD Tamil','History TV 18 HD Telugu'],
+                  'Hungama':['Hungama Hindi', 'Hungama Tamil', 'Hungama Telugu'],
+                  'Marvel HQ':['Marvel HQ Hindi', 'Marvel HQ Tamil', 'Marvel HQ Telugu'],
+                  'Nat Geo Wild':[ 'Nat Geo Wild Hindi','Nat Geo Wild Tamil', 'Nat Geo Wild Telugu'],
+                  'Nat Geo Wild HD':[ 'Nat Geo Wild HD Hindi','Nat Geo Wild HD Tamil','Nat Geo Wild HD Telugu'],
+                  'National Geographic':['National Geographic Telugu','National Geographic Tamil','National Geographic Bengali','National Geographic English'],
+                  'National Geographic HD':['National Geographic HD Hindi','National Geographic HD Telugu','National Geographic HD Bangla','National Geographic HD Tamil'],
+                  'NDTV Good Times':['NDTV Good Times English', 'NDTV Good Times Tamil'],
+                  'NICK':['NICK Telugu','NICK Tamil','NICK Malayalam','NICK Bangla','NICK Gujarati','NICK Marathi', 'Nick Kannada'],
+                  'Nick Junior':['Nick Junior Hindi'],
+                  'Sonic Nickelodeon':['Sonic Nickelodeon Tamil','Sonic Nickelodeon Kannada','Sonic Nickelodeon Telugu','Sonic Nickelodeon Malayalam','Sonic Nickelodeon Bangla','Sonic Nickelodeon Gujarati','Sonic Nickelodeon Marathi'],
+                  'Nick HD+':['Nick HD+ English','Nick HD+ Tamil','Nick HD+ Telugu'],
+                  'Pogo TV':['Pogo TV English', 'Pogo TV Tamil', 'Pogo TV Telugu'],
+                  'PTC Punjabi Gold':[ 'PTC Punjabi Gold English','PTC Punjabi Gold Hindi'],
+                  'PTC Simran':[ 'PTC Simran English','PTC Simran Hindi'],
+                  'PTC Music':[ 'PTC Music English','PTC Music Hindi'],
+                  'Sony BBC Earth':['Sony BBC Earth Hindi','Sony BBC Earth Tamil','Sony BBC Earth Telugu'],
+                  'Sony BBC Earth HD':['Sony BBC Earth HD Hindi','Sony BBC Earth HD Tamil','Sony BBC Earth HD Telugu'],
+                  'Sony ESPN':['Sony ESPN Tamil','Sony ESPN Telugu','Sony ESPN Bengali'],
+                  'Sony ESPN HD':['Sony ESPN HD Tamil','Sony ESPN HD Telugu','Sony ESPN HD Bengali'],
+                  'Sony YAY':['Sony YAY Malayalam','Sony YAY Tamil','Sony YAY Telugu','Sony YAY Bangla','Sony YAY English','Sony YAY Marathi'],
+                  'Sony SIX':['Sony SIX Tamil', 'Sony SIX Telugu'],
+                  'Sony SIX HD':['Sony SIX HD Tamil','Sony SIX HD Telugu'],
+                  'STAR Sports 1':['STAR Sports 1 Kannada','STAR Sports 1 Hindi','STAR Sports 1 Tamil','STAR Sports 1 Telugu','STAR Sports 1 Bangla','STAR Sports 1 Marathi'],
+                  'STAR Sports 2':['STAR Sports 2 Kannada'],
+                  'STAR Sports 1 HD':['STAR Sports 1 HD Hindi'],
+                  'STAR Sports 3':['STAR Sports 3 English'],
+                  'STAR Sports 2 HD':['STAR Sports 2 HD Kannada'],
+                  'TLC':['TLC English'],
+                  'TLC HD World':['TLC HD World Hindi'],
+                  'Travelxp HD':['Travelxp HD Hindi','Travelxp HD Bangla','Travelxp HD Tamil'],
+                  'Travelxp SD':['Travelxp Tamil','Travelxp SD Hindi','Travelxp SD Bangla']}
 
-    # UpdatedStatement.to_csv(dir + "statement_hc_done.csv", index=False)
-    # UpdatedStatement = UpdatedStatement[(UpdatedStatement['CHANNEL'].isin([1010413]))]
-    print("Hygiene Check processing complete.")
-    return UpdatedStatement
+indiaChannels = ['&Prive HD','&flix','&flix HD','Animal Planet HD World','Animal Planet','AXN','AXN HD','BBC World News','BTVI','CNBC TV 18','CNBC TV 18 Prime HD',
+'CNN News18','Colors Infinity HD','Colors Infinity SD','Comedy Central HD','Comedy Central','Da Vinci Learning India HD','DD India','discovery hd world',
+'discovery science','Discovery Turbo','Disney International HD','DD Sports','ET Now','Fox Crime India','FX','HTN News','HBO','HBO HD','India Ahead','India Today Television','Discovery HD World', 'Discovery Kids', 'Discovery Science','Investigation Discovery HD', 'STAR Sports 3 English',
+'Food Food','Mirror Now','Movies Now','Movies Now HD','MNX','MNX HD','Nat Geo People','NDTV 24x7','NDTV Profit','NEO Prime','NEO Sports','News X','NewsX', 'NewsX HD','Republic TV',
+'Romedy NOW','Romedy NOW HD','Romedy Now HD','MN+','Sony Le PLEX HD','Sony PIX','Sony Pix HD','Dsport','Sony ESPN HD','Sony ESPN','STAR Movies','STAR Movies Action','STAR Movies HD',
+'STAR Movies Select HD','Sony Six HD', 'Sony SIX HD','STAR Sports 4','Sony SIX','STAR Sports HD4','Sony Ten 1','Sony Ten 1 HD','Sony Ten 2','Sony Ten 2 HD','STAR World','STAR World HD',
+'STAR World Premiere HD','Sony Ten 3','Sony Ten 3 HD','Ten Golf','Sony Ten Golf HD','STAR Sports 1','STAR Sports 1 HD','Times Now','Times Now World','Fox Life HD',
+'Fox Life','Toonami','WB','Zee Café','Zee Cafe HD','Zee Studio','Zee Studio HD','TV5 Monde','9X','Care World','DD Kisan','STAR Sports 1 HD Hindi','Cartoon Network',
+'Filmy','Focus Haryana','Focus News','FYI TV18 HD','Free TV','Home Shop 18','Investigation Discovery','Lok Sabha','Lord Buddha TV','Maha Cartoon TV','Naaptol Blue',
+'Naaptol Green','Sadhna National','Shop CJ','Green TV','STAR Sports 1 Hindi','STAR Sports 2 HD','STAR Sports 2','FYI TV18','Zee Q','Ezmall.com','4TV News','Aalami Sahara',
+'DD Kashir','DD Urdu','Tehzeeb TV','News18 Urdu','Munsif TV','Zee Salaam','CN HD+','Bloomberg Quinttbr)','discovery kids','Disney Channel','Day & Night News',
+'Dil Se Music','Discovery Channel','Disney Junior','Hungama','Marvel HQ','Focus HiFi','Focus NE','Living Foodz','Living Foodz HD','Fox Traveller','NDTV Good Times',
+'TLC HD World','History TV 18','History TV 18 HD','Nick HD+','Indiavision','LYF','Nat Geo Wild','Nat Geo Wild HD','National Geographic','National Geographic HD','TLC',
+'NE HiFi','NE TV','News Express','NICK Junior', 'Nick Junior','NICK','Pogo TV','Sonic Nickelodeon','Sony YAY','Sony BBC Earth','Sony BBC Earth HD','STAR Sports 3','STAR Sports First',
+'STAR Sports Select 1 HD','STAR Sports Select 1 SD','STAR Sports Select 2 HD','STAR Sports Select 2 SD','Travelxp HD','Travelxp SD','WION','Zee Jagran','TV9 Telegana', 'WION Hindi']
+
+hsmChannels = ['&TV','&TV HD','Shaandaar Cinema','ShowBox',
+'9X Jalwa','ShowBox(tbr)','9XM','&pictures','&pictures HD','9XO','B4U Music','Aaj Tak','Aaj Tak HD','ABP News','Skystar Telugu','APN News(na)','B4U Kadak','Skystar Bangla',
+'Bindass','Anjan TV','E24','E 24', 'B4U Movies','Channel V(na)','Bflix Movies','CNBC Awaaz','Big Magic','Colors','Colors HD','Colors Rishtey','Dangal','DD Arunprabha',
+'DD Bharati','DD News','DD Madhya Pradesh','Dhamaal(na)','Divya','Disha TV(na)','Dream TV(na)','EPIC','Mastiii','Box Cinema','Hindi Khabar','Colors Cineplex','India News',
+'India TV','India Voice','Janatantra tv','Janatantra TV', 'Khushboo TV(na)','Live India(na)','Colors Cineplex HD','Manoranjan TV','MTV','Movie House(na)','MTunes HD(na)','JK 24x7 News',
+'Kaatyayani TV(na)','Life Ok(na)','Life Ok HD(na)','Enterr 10','MOC(na)','MTV Beats','MUBU TV(na)','Multiplex','MTV Beats HD','Music Xpress(na)','Mubu TV(na)',
+'NDTV India','News 24','News India 24x7','News Nation','News World India','News1 India','Pepsi MTV Indies(na)','News18 India','DD National','Housefull Movies','Movie Plus',
+'RT Movies(na)','Sadhna Prime News(na)','Sahara One(na)','Republic Bharat','Sanskar','Satsang','Maha Movie','DD Rajasthan','DD Uttar Pradesh','Movies OK','MTV HD+',
+'Jeet Prime HD(v)','Sony Rox HD(na)','Jeet Prime(v)','Sony Entertainment Television','Cinema TV India','Sony Entertainment Television HD','Sony Pal','Skystar Movies',
+'Sony MAX 2','Sony MAX HD(v)','Sony MAX(v)', 'Sony Max HD', 'Sony MAX','SONY SAB','SONY SAB HD','STAR Bharat','Sony Wah','Samay','Sudarshan News','STAR Gold','Surya Samachar','Tez','Total TV', 'Sony SAB HD', 'STAR Gold 2 HD', 'Sony SAB', 'STAR Gold 2',
+'STAR Gold HD','STAR Gold Select HD','STAR Gold Select SD','Bindass Play(na)','Vaa Movies(na)','Vedic','STAR Utsav Movies','Music India','Sony MIX','Surya Cinema',
+'STAR Bharat HD','Zee Business','UTV Action','UTV HD','UTV Movies','Zee Classic(tbr)', 'Zee Classic','TV9 Bharatvarsh','WOW Cinema One','Zee Hindustan','Zee Smile(na)','STAR Plus',
+'STAR Plus HD','Zindagi(na)','VH1','VH1 HD','STAR Utsav','Dillagi(na)','Zee Anmol','MTunes SD(na)','WOW','Zee ETC Bollywood','Zing','Zee TV','Zee TV HD','Rajya Sabha TV',
+'Zee Action','Zee Anmol Cinema','Top Blockbuster TV(tbr)','Zoom','Zee News','Zee Bollywood','Zee Cinema','Zee Cinema HD','Aaho Music','ANB News (tbr)', 'ANB News','OK India']
+
+regionChannelMapping = {'Andhra Pradesh':['CVR News English','10 TV','99% TV','ABN Andhra Jyothi','AP 24x7','Bhakti TV','Bhaarat Today','CVR Health','CVR News Telugu','CVR OM Spiritual',
+'DD Saptagiri','DD Yadagiri','ETV Plus','ETV Abhiruchi','ETV Andhra Pradesh','ETV Cinema','ETV Telugu','ETV Life','ETV Telugu HD','ETV Telangana','Express TV',
+'Gemini Action','Gemini Comedy','Gemini life','Gemini Movies','Gemini Movies HD','Gemini Music','Gemini Music HD','Gemini News','Gemini TV','Gemini TV HD',
+'Gyan Yogi','Hindu Dharmam','HM TV','I News','Mahaa News','TV1','Kushi TV','STAR Maa Gold','STAR Maa Movies','STAR Maa Movies HD','STAR Maa Music','STAR Maa',
+'STAR Maa HD','Mojo TV','NTV Telugu','Raj News Telugu','Raj Musix Telugu','Sakshi TV','Sneha TV','STAR Sports 1 Telugu','Studio N News','Studio One+','SVBC',
+'T News','Tollywood TV','TV 5 News','TV9 Telugu','V6 News','Vanitha TV','Vissa','Zee Cinemalu','Zee Cinemalu HD','Zee Telugu','Zee Telugu HD','Maa Comedy','TV9 AP'],
+'North East / Sikkim':['Assam Talks','DD North East','North East Live','DY 365','Rengoni','Jonack','News18 Assam','News Live','News Time Assam','Protidin Time','Prag News','Ramdhenu','Rang','DD Guwahati'],
+'Bihar & Jharkhand':['Bhojpuri Dhamaka DISHUM','Housefull Action','Mahua Plus','Oscar Movies Bhojpuri','Sangeet Bhojpuri','Big Ganga','Bhojpuri Cinema','Dabangg','DD Bihar','Kashish News','News18 Bihar Jharkhand','Sahara Samay Bihar & Jharkhand','Taaza TV','Zee Bihar Jharkhand','B4U Bhojpuri'],
+'DELHI':['Dilli Aaj Tak'],
+'GUJ/DNH':['ABP Asmita','Colors Gujarati Cinema','DD Girnar','Colors Gujarati','News18 Gujarati','Free TV India News Gujarat','GSTV','India News Gujarat','Mantavya News','Sandesh News','TV9 Gujarati','VTV News','Zee 24 Kalak','CNBC Bazar'],
+'Har / HP / J&K':['Gulistan News','India News Haryana','Janta TV','Khabar Fast','Khabrain Abhi Tak','Sahara Samay NCR/Haryana/Rajasthan/Punjab','Total Haryana','TV 100', 'Andy Haryana'],
+'Karnataka':['News 9','Ayush TV','All Time','STAR Suvarna','STAR Suvarna HD','STAR Suvarna Plus','Chintu TV','Colors Kannada HD','Colors Kannada Cinema','Colors Super',
+'DD Chandana','Dighvijay 24x7 News','Colors Kannada','News18 Kannada','Janasri News','Janataa TV Kannada','Kasthuri Newz 24','Kasthuri TV','TV1 News 24x7','Kalki TV',
+'NewsX Kannada','Power TV','Praja TV','Public TV','Public Movies','Raj Music Kannada','Raj News Kannada','Samaya News','Saral Jeevan','STAR Sports 1 Kannada',
+'Suddi TV','Suriyan TV','Suvarna News','Swaraj Express Kannada','TV 5 Kannada','TV9 Kannada','Udaya Comedy','Udaya Movies','Udaya Music','Udaya News','Udaya TV',
+'Udaya TV HD','VIP News','Zee Kannada','Zee Kannada HD','Public Music','B News'],
+'Kerala':['Asianet News','Amrita TV','Asianet','Asianet HD','Janam TV','Asianet Movies','Asianet Plus','DD Malayalam','Flowers TV','Kairali TV','Kaumudy TV ','Kairali News',
+'Kerala Vision','Kappa TV','Surya Movies','Kochu TV','Manorama News','Mangalam TV','Mathrubhumi News','Media One TV','News18 Kerala','Reporter','Surya Action',
+'Mazhavil Manorama', 'Mazhavil Manorama HD', 'Surya Music','Surya Comedy','Surya TV','We TV','Surya TV HD','Zee Keralam','Twenty Four','Zee Keralam HD'],
+'MH/GOA':['9X Jhakaas','ABP Majha','Chitrapat Marathi','Colors Marathi HD','DD Sahyadri','Colors Marathi','Fakt Marathi','News18 Lokmat','Jai Maharashtra','Maiboli',
+'Mi Marathi','Maharashtra 1','Saam TV','Sangeet Marathi','Sony Marathi','STAR Pravah','TV9 Marathi','Zee 24 Taas','Zee Marathi','Zee Marathi HD','Zee Talkies',
+'Zee Talkies HD','Zee Yuva','Zingaat','STAR Pravah HD','STAR Sports 1 Marathi','Sun Marathi','AM News - Spandan Maharashtrache'],
+'Madhya Pradesh & Chhattisgarh':['Bansal News','IBC 24','IND 24','India News Madhya Pradesh / Chattisgarh','News18 Madhya Pradesh Chattisgarh',
+'Sadhna News MP/CG','Sahara Samay MP/Chattisgarh','Swaraj Express SMBC','Zee Madhya Pradesh Chhattisgarh',
+'Sahara Samay MP/Chattisgarh','India News Madhya Pradesh/Chattisgarh','Sadhna News MP/CG'],
+'Orissa':['DD Oriya','News18 Odia','Colors Oriya','Focus Odisha','Kalinga TV','Kanak News','MBC TV','Naxatra News','News World Odisha','OTV','News7','Prarthana','Zee Sarthak','Tarang Music','Tarang','Zee Odisha','Alankar','Prarthana'],
+'Pun / Cha':['News18 Punjab/Haryana/Himachal','Living India News','Zee Punjab Haryana Himachal','9X Tashan','Balle Balle','DD Punjabi','Chardikla Time TV','India News Punjab',
+'Fateh TV','MH One','MH One News', 'MH One Prime','Pitaara TV','PTC Chak De','PTC News','PTC Punjabi','P Tunes','P Plus','T TV','Manoranjan Movies','Khushi ','PTC Simran',
+'PTC Punjabi Gold','PTC Music','Yo Punjabi'],
+'Rajasthan':['1st India Rajasthan','India News Rajasthan','Jan TV','News18 Rajasthan','Patrika TV Rajasthan','Samachar Plus Rajasthan','Zee Rajasthan News'],
+'Tamilnadu/Pondicherry':['7S Music','Arra TV','Adithya TV','Captain News','Cauvery News','Chutti TV','Colors Tamil','Colors Tamil HD','Discovery Channel Tamil', 'IsaiAruvai','J Movie','Jaya Max',
+'Jaya Plus','DD Podhigai','Jaya TV','Kalaignar TV','Makkal TV','MK SIX','Mega Musiq','KTV','KTV HD','Lotus News','Malai Murasu Seithikal','Mega 24','MK Tunes','Mega TV',
+'MK TV','News 7 Tamil','News18 Tamil Nadu','Moon TV','Peppers','Polimer','Polimer News','Puthiya Thalaimurai','Puthuyugam TV','Raj Digital Plus','Raj Musix Tamil',
+'Raj News 24x7','Raj TV','Sahana TV','SAI TV','Sathiyam TV','Seithigal','Shalini TV','Sirippoli','Sri Sankara','STAR Sports 1 Tamil','STAR Vijay','STAR Vijay Super',
+'STAR Vijay HD','Sun Action','Sun life','Sun Music','Sun Music HD','Sun News','Sun TV','Sun TV HD','Super TV','Thanthi TV','Travelxp Tamil','Tunes 6 Music',
+'Vaanavil TV','Vasanth TV','Velicham Plus','WIN TV','Vendhar TV','Zee Tamil','Zee Tamil HD','Sun TV RI','Captain TV','News 7 Tamil'],
+'UP/UTK':['ABP Ganga','Bharat Samachar','Buland News Samachar Plus','FM News','HNN 24x7','India News Uttar Pradesh / Uttrakhand','K News India','News State UP Uttarakhand',
+'News18 Uttar Pradesh Uttarakhand','Sahara Samay UP Uttarakhand','TV 24','Zee Uttar Pradesh Uttarakhand'],
+'West Bengal':['ABP Ananda','Aakash Aath','Bangla Time','ANM News','Calcutta News','Bangla Talkies','Colors Bangla','Colors Bangla Cinema','Kolkata TV','Colors Bangla HD',
+'Dhoom Music Bangla','DD Bangla','Enterr 10 Bangla','News Time Bangla','Jalsha Movies','Jalsha Movies HD','Khushboo Bangla','News18 Bangla','Rose TV','Music F',
+'Onkar Only Truth','R Plus','Orange TV','Sadhna News','R Vision','R Plus Gold','Rupasi Bangla','Zee 24 Ghanta','Sangeet Bangla','Sony Aath','STAR Jalsha',
+'STAR Jalsha HD','STAR Sports 1 Bangla','Sun Bangla','Aamar Cinema','Zee Bangla','Zee Bangla HD','Zee Bangla Cinema','Focus Bangla']}
+
+hsmStates = ['Bihar & Jharkhand', 'DELHI', 'GUJ/DNH', 'Har / HP / J&K', 'MH/GOA', 'Madhya Pradesh & Chhattisgarh',
+       'North East / Sikkim', 'Orissa', 'Pun / Cha', 'Rajasthan', 'UP/UTK', 'West Bengal']
