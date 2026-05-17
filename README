@@ -64,3 +64,644 @@ Scikit-learn
 This project demonstrates how machine learning can be used to identify customers at risk of churn. By
 leveraging key features such as tenure and monthly charges, businesses can design targeted retention
 strategies to reduce customer loss and improve long-term profitability.
+
+
+
+import numpy as np
+import pandas as pd
+import glob
+import re
+from kmodes.kmodes import KModes
+from multiprocessing import Pool, cpu_count
+import functools
+
+def processUser(ind, channel, statementFile):
+    if ind[0]%100==0:
+        print(ind)
+    consideredData = statementFile[(statementFile['CHANNEL'].values==channel) & (statementFile['KEY'].values==ind[1])][['KEY', 'START', 'END', 'DURATION']]
+    flagList = list(np.repeat("no session", len(consideredData)))
+
+    for row in range(0, len(consideredData) - 1):
+        if consideredData.iloc[row, 2] == consideredData.iloc[row + 1, 1]:
+            if flagList[row - 1] == "session "+str(row-1):
+                flagList[row] = "session "+str(row-1)
+                flagList[row + 1] = "session "+str(row-1)
+            else:
+                flagList[row] = "session " + str(row)
+                flagList[row + 1] = "session " + str(row)
+    #statementFile.loc[statementFile.index.isin(consideredData.index), 'CONSECUTIVE'] = flagList
+
+    return pd.DataFrame({'index':consideredData.index, 'flag':flagList})
+
+def makeDurList(historyDataConsidered):
+    if len(historyDataConsidered)<12:
+        return list(historyDataConsidered) + list(np.repeat(0, 12 - len(historyDataConsidered)))
+    else:
+        return list(historyDataConsidered)
+
+def getDurComp(ind, consideredDataChannel, historyDataChannel):
+    consideredDataInd = consideredDataChannel[consideredDataChannel['KEY'].isin([ind[1]])]
+    historyDataConsidered = historyDataChannel[historyDataChannel['KEY'].isin([ind[1]])]
+    durList = {'durList':[], 'index':[]}
+    for part in list(consideredDataInd['DAYPART']):
+        data = historyDataConsidered[historyDataConsidered['DAYPART'].isin([part])]['DURATION'].tolist()
+        data.extend(list(np.repeat(0, max(0, 12 - len(data)))))
+        durList['durList'].append(data)
+    durList['index'] = list(consideredDataInd.index)
+
+    return pd.DataFrame(durList)
+
+def getDurCompGenre(ind, consideredDataGenre, historyDataGenre):
+    consideredDataInd = consideredDataGenre[consideredDataGenre['KEY'].isin([ind[1]])]
+    historyDataConsidered = historyDataGenre[historyDataGenre['KEY'].isin([ind[1]])]
+
+    durList = {'durList':[], 'index':[]}
+    for part in list(consideredDataInd['DAYPART']):
+        durList['durList'].append(makeDurList(historyDataConsidered[historyDataConsidered['DAYPART'].isin([part])]['DURATION']))
+    durList['index'] = list(consideredDataInd.index)
+
+    return pd.DataFrame(durList)
+
+def checkDayPartsPresent(start, end, dayPartsDict):
+    dayParts = {'name':[], 'from':[], 'to':[], 'dp':[]}
+    for part in list(dayPartsDict.values()):
+        if start >= part['from'] and start <= part['to']:
+            if end >= part['from'] and end <= part['to']:
+                dayParts['name'].append(part['name'])
+                dayParts['dp'].append(part['part'])
+                dayParts['from'].append(start)
+                dayParts['to'].append(end)
+            else:
+                dayParts['name'].append(part['name'])
+                dayParts['dp'].append(part['part'])
+                dayParts['from'].append(start)
+                dayParts['to'].append(part['to'])
+        elif end >= part['from'] and end <= part['to']:
+            dayParts['name'].append(part['name'])
+            dayParts['dp'].append(part['part'])
+            dayParts['from'].append(part['from'])
+            dayParts['to'].append(end)
+        elif (part['from'] >= start and part['from'] <= end):
+            if (part['to'] >= start and part['to'] <= end):
+                dayParts['name'].append(part['name'])
+                dayParts['dp'].append(part['part'])
+                dayParts['from'].append(part['from'])
+                dayParts['to'].append(part['to'])
+            else:
+                dayParts['name'].append(part['name'])
+                dayParts['dp'].append(part['part'])
+                dayParts['from'].append(part['from'])
+                dayParts['to'].append(end)
+    return dayParts
+
+def calcOutlierMAD(durList, channel, bval, tamperedChannels):
+    try:
+        durList = np.array(durList).astype(np.float)
+    except:
+        durList = np.array(durList[0]).astype(np.float)
+
+    if (channel not in tamperedChannels) and (np.sum(durList)==0):
+        return "PASS"
+    else:
+        median = np.median(durList)
+        absMedian = np.median(np.abs(durList - median))
+        mad = median + ((1.483 * absMedian) * bval)
+        mad = np.round(mad/60, decimals=0) * 60
+        return min(max(mad, 0), 1800)
+
+def processSplitMAD(data, tamperedChannels):
+    mads = data[['DURATIONLIST', 'CHANNEL', 'BVAL']].apply(lambda x: calcOutlierMAD(x['DURATIONLIST'], x['CHANNEL'], x['BVAL'], tamperedChannels), axis=1)
+    return pd.DataFrame({"index":data.index, "mad":mads})
+
+def parallelizeMADCalc(df, splits, tamperedConfig):
+    df_split = np.array_split(df, splits)
+    pool = Pool(cpu_count() - 3)
+    df = pd.concat(pool.map(functools.partial(processSplitMAD, tamperedChannels=tamperedConfig), df_split))
+    pool.close()
+    pool.join()
+    return df
+
+def calcOutlierMADVer2(durList, bval):
+    try:
+        durList = np.array(durList).astype(np.float)
+    except:
+        durList = np.array(durList[0]).astype(np.float)
+
+    if np.sum(durList)==0:
+        return "PASS"
+    else:
+        median = np.median(durList)
+        absMedian = np.median(np.abs(durList - median))
+        mad = median + ((1.483 * absMedian) * bval)
+        mad = np.round(mad / 60, decimals=0) * 60
+        #print(mad, durList, median, bval)
+        return min(max(mad, 0), 1800)
+
+def prev12Dates(reqDate):
+    dates = []
+    reqDate = pd.to_datetime(reqDate)
+    day = 'W-'+reqDate.strftime('%A')[:3]
+    allDates = pd.date_range(start='2019', end=reqDate, freq=day).tolist()
+    for date in allDates:
+        if date < reqDate:
+            dates.append(date.strftime('%Y%m%d'))
+    return dates[len(dates)-12:]
+
+def prev12DData(dayPartsDict, cdate):
+    historyData = pd.DataFrame()
+    path = "\\\\10.10.2.51\\Released_Data\\R0\\**\\*_statement.csv"
+    dirList = []
+    print(prev12Dates(cdate))
+    for dir in glob.glob(path, recursive=True):
+        if (re.search("_og|-og|Run|--|_org|old|Old|D3|Master_statement|\\\W46\20191109\20191109_statement\20191109_statement.csv", dir)==None) & (len(dir.split("\\"))<=9):
+            for date in prev12Dates(cdate):
+                if re.search(date, dir):
+                    if dir.split("\\")[6] in ["W" + str(week) for week in range(40, 49)]:
+                        dirList.append(dir.replace("R0", "R0_Unmasked Data"))
+                    else:
+                        dirList.append(dir)
+    print(len(dirList))
+    p = Pool(cpu_count()-3)
+    historyData = historyData.append(p.map(functools.partial(historyDataProcess, dayPartsDict=dayPartsDict), dirList))
+    p.close()
+    p.join()
+    return historyData
+
+def historyDataProcess(dir, dayPartsDict):
+    data = pd.read_csv(dir)
+    print(dir)
+    data['DATE'] = np.repeat(dir.split("\\")[7], len(data))
+    data['END'] = data['START'] + data['DURATION']
+    data['KEY'] = data['HOUSEHOLD'].astype(str) + " " + data['INDIVIDUAL'].astype(str)
+
+    dayParts = {'name': [], 'from': [], 'to': []}
+    numOfDayParts = []
+    for start, end in zip(list(data['START']), list(data['END'])):
+        tempDf = checkDayPartsPresent(start, end, dayPartsDict)
+        dayParts['name'].extend(tempDf['name'])
+        dayParts['from'].extend(tempDf['from'])
+        dayParts['to'].extend(tempDf['to'])
+        numOfDayParts.append(len(tempDf['name']))
+
+    data = data.loc[data.index.repeat(pd.Series(numOfDayParts))]
+    data['DAYPART'] = dayParts['name']
+    data['START'] = dayParts['from']
+    data['END'] = dayParts['to']
+    data['DURATION'] = data['END'] - data['START']
+
+    data = data.groupby(by=['DATE', 'CHANNEL', 'KEY', 'DAYPART'])['DURATION'].sum().reset_index()
+    return data
+
+def stateGroupMapping(hhStatus):
+    hhStatus.loc[hhStatus['TOWNVILLAGECODE'] == 'GHAZIABAD669', 'STATE'] = 'NCT Of Delhi'
+    hhStatus.loc[hhStatus['TOWNVILLAGECODE'].isin(['GURGAON505', 'Gurgaon505']), 'STATE'] = 'NCT Of Delhi'
+    hhStatus.loc[hhStatus['TOWNVILLAGECODE'].isin(['FARIDABAD492', 'Faridabad492']), 'STATE'] = 'NCT Of Delhi'
+    stateGroupMapping = {'Telangana': 'Andhra Pradesh', 'Andhra Pradesh': 'Andhra Pradesh', 'Karnataka': 'Karnataka', 'Uttar Pradesh': 'UP/UTK',
+                         'West Bengal': 'West Bengal', 'Rajasthan': 'Rajasthan', 'Maharashtra': 'MH/GOA', 'Goa': 'MH/GOA', 'Gujarat': 'GUJ/DNH',
+                         'Dadra & Nagar Haveli': 'GUJ/DNH', 'Mizoram': 'North East / Sikkim','Assam': 'North East / Sikkim',
+                         'Arunachal Pradesh': 'North East / Sikkim', 'Bihar': 'Bihar & Jharkhand','Jharkhand': 'Bihar & Jharkhand', 'Odisha': 'Orissa',
+                         'Punjab': 'Pun / Cha', 'Himachal Pradesh': 'Har / HP / J&K', 'Haryana': 'Har / HP / J&K', 'NCT Of Delhi': 'DELHI', 'Chandigarh': 'Pun / Cha',
+                         'Sikkim': 'North East / Sikkim', 'Uttarakhand': 'UP/UTK', 'Tamil Nadu': 'Tamilnadu/Pondicherry', 'Puducherry': 'Tamilnadu/Pondicherry',
+                         'Madhya Pradesh': 'Madhya Pradesh & Chhattisgarh', 'Chhattisgarh': 'Madhya Pradesh & Chhattisgarh', 'Kerala': 'Kerala', 'Daman & Diu': 'GUJ/DNH',
+                         'Nagaland': 'North East / Sikkim', 'Manipur': 'Assam / North East / Sikkim', 'Tripura': 'North East / Sikkim',
+                         'Meghalaya': 'North East / Sikkim','Jammu & Kashmir': 'Har / HP / J&K'}
+    hhStatus['STATEGROUP'] = hhStatus['STATE'].map(stateGroupMapping)
+    hhStatus.set_index('WID', inplace=True)
+    return hhStatus
+
+def clipDuration(x):
+    if x['FINAL_OUTLIER']=='LV1' or x['FINAL_OUTLIER']=='LV1G':
+        val = x['MADOUTLIER_LV1']
+    elif x['FINAL_OUTLIER']=='LV2' or x['FINAL_OUTLIER']=='LV2G':
+        val = x['MADOUTLIER_LV2']
+    elif x['FINAL_OUTLIER']=='LV3' or x['FINAL_OUTLIER']=='LV3G':
+        val = x['MADOUTLIER_LV3']
+
+    if x.name%10000==0:
+        print(x.name)
+    return min(val, x['DURATION'])
+
+def readChannelConfig(dir):
+    for dir in glob.glob(dir+'*', recursive=True):
+        if re.search("Final List", dir):
+            channelGenre = pd.read_excel(dir, sheet_name='Channel Update')
+            channelGenre.columns = [col.strip() for col in channelGenre.columns]
+            channelGenre['Language'] = channelGenre['Language'].str.strip()
+            channelGenre.loc[channelGenre['Genre'] == 'Movie', 'Genre'] = 'Movies'
+            print(dir)
+    hindiCondition = ((channelGenre['Language'].apply(lambda x:re.search("Hindi", str(x))!=None)) &
+                     (channelGenre['Genre'].apply(lambda x:re.search("Movies|Kids|Sports|GEC", str(x))!=None)))
+    englishCondition = ((channelGenre['Language'].apply(lambda x:re.search("English", str(x))!=None)) &
+                     (channelGenre['Genre'].apply(lambda x:re.search("Kids|Sports", str(x))!=None)))
+    exemptChannels = channelGenre[hindiCondition | englishCondition]['Channel Codes']
+    return channelGenre, exemptChannels
+'''
+def assignStochastic(uniqueCases, stochasticConfig, exemptChannels):
+    probList = []
+    for i, (state, tc, CHANNEL) in enumerate(zip(uniqueCases['STATE'], uniqueCases['detailed_town_class'], uniqueCases['CHANNEL'])):
+        tempStoch = stochasticConfig[(stochasticConfig['STATE'].values==state) & (stochasticConfig['detailed_town_class'].values==tc)]
+        prob = tempStoch[(tempStoch['CHANNEL'].values == CHANNEL)].sort_values(by=['PROBABILITY']).reset_index()['PROBABILITY']
+        if len(prob) == 0:
+            prob = tempStoch[(tempStoch['CHANNEL'].isna())].sort_values(by=['PROBABILITY']).reset_index()['PROBABILITY']
+
+        probList.append(np.nan) if len(prob) == 0 else probList.append(prob[0])
+
+        if i%10000==0:
+            print(i)
+
+    uniqueCases['PROBABILITY'] = probList
+    uniqueCases.loc[uniqueCases['CHANNEL'].isin(exemptChannels), 'PROBABILITY'] = 1
+    uniqueCases.loc[uniqueCases['PROBABILITY'].isna(), 'PROBABILITY'] = 0.5
+
+    return uniqueCases
+'''
+def assignStochastic(uniqueCases, stochasticConfig, exemptChannels):
+    probList = []
+    uniqueCases.loc[uniqueCases['CHANNEL'].isin(exemptChannels), 'PROBABILITY'] = 1
+    for i, (state, tc, CHANNEL) in enumerate(zip(uniqueCases['STATE'], uniqueCases['detailed_town_class'], uniqueCases['CHANNEL'])):
+        tempStoch = stochasticConfig[(stochasticConfig['STATE'].values==state) & (stochasticConfig['detailed_town_class'].values==tc)]
+        prob = tempStoch[(tempStoch['CHANNEL'].values == CHANNEL)]['PROBABILITY'].tolist()
+        prob.extend(tempStoch[(tempStoch['CHANNEL'].isna())]['PROBABILITY'].tolist())
+        prob = pd.Series(prob).sort_values()
+
+        if (len(prob)==0) and (CHANNEL in exemptChannels.tolist()):
+            probList.append(1)
+        elif len(prob)==0:
+            probList.append(np.nan)
+        else:
+            probList.append(prob[0])
+
+    uniqueCases['PROBABILITY'] = probList
+    uniqueCases.loc[uniqueCases['PROBABILITY'].isna(), 'PROBABILITY'] = 0.5
+    return uniqueCases
+
+def assignStochasticUpdated(uniqueCases, stochasticConfig, exemptChannels):
+    probList = []
+    for i, (state, CHANNEL) in enumerate(zip(uniqueCases['STATE'], uniqueCases['CHANNEL'])):
+        tempStoch = stochasticConfig[(stochasticConfig['CHANNEL'].values==CHANNEL)]
+        prob = tempStoch[(tempStoch['STATE'].values == state)].sort_values(by=['PROBABILITY']).reset_index()['PROBABILITY']
+        if len(prob) == 0:
+            prob = tempStoch[(tempStoch['STATE'].isna())].sort_values(by=['PROBABILITY']).reset_index()['PROBABILITY']
+
+        probList.append(np.nan) if len(prob) == 0 else probList.append(prob[0])
+
+        if i%10000==0:
+            print(i)
+
+    uniqueCases['PROBABILITY'] = probList
+    uniqueCases.loc[uniqueCases['CHANNEL'].isin(exemptChannels), 'PROBABILITY'] = 1
+    uniqueCases.loc[uniqueCases['PROBABILITY'].isna(), 'PROBABILITY'] = 0.5
+
+    return uniqueCases
+
+def assignMADUpdated(stateChannelData, madConfig, defaultMAD):
+    probList = []
+    for i, (state, CHANNEL) in enumerate(zip(stateChannelData['STATE'], stateChannelData['CHANNEL'])):
+        tempMADB = madConfig[(madConfig['CHANNEL'].values == CHANNEL)]
+        prob = tempMADB[(tempMADB['STATE'].values == state)].sort_values(by=['b Value']).reset_index()['b Value']
+        if len(prob) == 0:
+            prob = tempMADB[(tempMADB['STATE'].isna())].sort_values(by=['b Value']).reset_index()['b Value']
+        probList.append(np.nan) if len(prob) == 0 else probList.append(prob[0])
+        if i % 10000 == 0:
+            print(i)
+    stateChannelData['BVAL'] = probList
+    stateChannelData.loc[stateChannelData['BVAL'].isna(), 'BVAL'] = defaultMAD
+
+    return stateChannelData
+
+def assignMAD(stateChannelData, madConfig, defaultMAD):
+    stateChannelData['BVAL'] = np.nan
+    for i, (state, channel, tc, bval) in enumerate(zip(madConfig['STATE'], madConfig['CHANNEL'], madConfig['detailed_town_class'], madConfig['b Value'])):
+        stateChannelData.loc[(stateChannelData['STATE'].values==state) & (stateChannelData['CHANNEL'].values==channel) & (stateChannelData['detailed_town_class']==tc), 'BVAL'] = bval
+    stateChannelData.loc[stateChannelData['BVAL'].isna(), 'BVAL'] = defaultMAD
+    return stateChannelData
+
+def channelLevel2Process(state, required_cols, demoFile, statementFile):
+    madDict = {'CHANNEL': [], 'state_group': [], 'clusters': [], 'DAYPART': [], 'MADOUTLIER_LV2': [], 'CG_DUR_LV2': []}
+    print("state: ", state)
+    consideredData = demoFile.loc[demoFile['state_group'].values == state]
+    train = pd.get_dummies(consideredData[required_cols], columns=required_cols, dummy_na=False)
+    model = KModes(n_clusters=2)
+    clusters = model.fit_predict(train)
+    demoFile.loc[consideredData.index, 'clusters'] = clusters
+    kmodes = model.cluster_centroids_
+    shape = kmodes.shape
+
+    for i in range(shape[0]):
+        demoConsideredV1 = demoFile[(demoFile['state_group'].values == state) & (demoFile['clusters'].values == i)]
+        statementConsidered = statementFile[statementFile['KEY'].isin(demoConsideredV1.loc[:, 'KEY'].unique())]
+        #print("cluster: ", i, len(demoConsideredV1))
+        for channel in statementConsidered['CHANNEL'].unique():
+            statementConsideredV1 = statementConsidered[statementConsidered['CHANNEL'] == channel]
+            for part in statementConsideredV1['DAYPART'].unique():
+                cg_dur = makeDurList(statementConsideredV1[(statementConsideredV1['DAYPART'].values == part) &
+                                               (statementConsideredV1['DURATION'].values != 0)].groupby('KEY')['DURATION'].sum().tolist())
+                MAD = calcOutlierMADVer2(cg_dur, statementConsideredV1['BVAL'].iloc[0])
+                madDict['state_group'].append(state)
+                madDict['clusters'].append(i)
+                madDict['CHANNEL'].append(channel)
+                madDict['DAYPART'].append(part)
+                madDict['MADOUTLIER_LV2'].append(MAD)
+                madDict['CG_DUR_LV2'].append(np.median(cg_dur))
+    return pd.DataFrame(madDict), pd.DataFrame({"index":consideredData.index, "cluster":clusters})
+
+def channelLevel3Process(state, statementFile, historyDataUse):
+    madDict = {'CHANNEL': [], 'state_group': [], 'clusters': [], 'DAYPART': [], 'MADOUTLIER_LV3': [], 'CG_DUR_LV3': []}
+    print(state)
+    statementConsidered = statementFile[statementFile['state_group'] == state]
+    for i in range(0, 2):
+        statementConsideredV1 = statementConsidered[statementConsidered['clusters'].values == i]
+        historyConsidered = historyDataUse[historyDataUse['KEY'].isin(statementConsideredV1['KEY'].unique())]
+        #print("cluster: ", i)
+        for channel in statementConsideredV1['CHANNEL'].unique():
+            statementConsideredV2 = statementConsideredV1[statementConsideredV1['CHANNEL'].values == channel]
+            historyConsideredV1 = historyConsidered[(historyConsidered['CHANNEL'] == channel) & (historyConsidered['KEY'].isin(statementConsideredV2['KEY'].unique()))]
+            for part in statementConsideredV2['DAYPART'].unique():
+                indV2 = statementConsideredV2[statementConsideredV2['DAYPART'].values == part]['KEY'].unique()
+                cg_dur = historyConsideredV1[(historyConsideredV1['DAYPART'].values == part) &
+                                             (historyConsideredV1['DURATION'].values != 0) &
+                                             (historyConsideredV1['KEY'].isin(indV2))].groupby(['DATE', 'KEY'])['DURATION'].sum().reset_index()
+                cg_dur = cg_dur.groupby('DATE')['DURATION'].median().tolist()
+                MAD = calcOutlierMADVer2(cg_dur, statementConsideredV1['BVAL'].iloc[0])
+                madDict['state_group'].append(state)
+                madDict['clusters'].append(i)
+                madDict['CHANNEL'].append(channel)
+                madDict['DAYPART'].append(part)
+                madDict['MADOUTLIER_LV3'].append(MAD)
+                madDict['CG_DUR_LV3'].append(np.median(cg_dur))
+    return pd.DataFrame(madDict)
+
+def genreLevel2Process(state, required_cols, demoFile, statementFileGenre, defaultBval):
+    madDict = {'GENRE': [], 'state_group': [], 'clusters': [], 'DAYPART': [], 'MADOUTLIER_LV2': [], 'CG_DUR_LV2': []}
+    print("state: ", state)
+    consideredData = demoFile.loc[demoFile['state_group'].values == state]
+    train = pd.get_dummies(consideredData[required_cols], columns=required_cols, dummy_na=False)
+    model = KModes(n_clusters=2)
+    clusters = model.fit_predict(train)
+    demoFile.loc[consideredData.index, 'clusters'] = clusters
+    kmodes = model.cluster_centroids_
+    shape = kmodes.shape
+
+    for i in range(shape[0]):
+        demoConsideredV1 = demoFile[(demoFile['state_group'].values == state) & (demoFile['clusters'].values == i)]
+        statementConsidered = statementFileGenre[statementFileGenre['KEY'].isin(demoConsideredV1.loc[:, 'KEY'].unique())]
+        #print("cluster: ", i, len(demoConsideredV1))
+        for genre in statementConsidered['GENRE'].value_counts().index:
+            statementConsideredV1 = statementConsidered[statementConsidered['GENRE'] == genre]
+            for part in statementConsideredV1['DAYPART'].unique():
+                cg_dur = statementConsideredV1[(statementConsideredV1['DAYPART'].values == part) &
+                                               (statementConsideredV1['DURATION'].values != 0)].groupby('KEY')['DURATION'].sum().tolist()
+                MAD = calcOutlierMADVer2(cg_dur, defaultBval)
+                madDict['state_group'].append(state)
+                madDict['clusters'].append(i)
+                madDict['GENRE'].append(genre)
+                madDict['DAYPART'].append(part)
+                madDict['MADOUTLIER_LV2'].append(MAD)
+                madDict['CG_DUR_LV2'].append(np.median(cg_dur))
+    return pd.DataFrame(madDict), pd.DataFrame({"index":consideredData.index, "cluster":clusters})
+
+def genrelLevel3Process(state, statementFileGenre, historyDataUse, defaultBval):
+    madDict = {'GENRE': [], 'state_group': [], 'clusters': [], 'DAYPART': [], 'MADOUTLIER_LV3': [], 'CG_DUR_LV3': []}
+    print(state)
+    statementConsidered = statementFileGenre[statementFileGenre['state_group'] == state]
+    for i in range(0, 2):
+        statementConsideredV1 = statementConsidered[statementConsidered['clusters'].values == i]
+        historyConsidered = historyDataUse[historyDataUse['KEY'].isin(statementConsideredV1['KEY'].unique())]
+        #print("cluster: ", i)
+        for genre in statementConsidered['GENRE'].value_counts().index:
+            statementConsideredV2 = statementConsideredV1[statementConsideredV1['GENRE'].values == genre]
+            historyConsideredV1 = historyConsidered[(historyConsidered['GENRE'] == genre) & (
+                historyConsidered['KEY'].isin(statementConsideredV2['KEY'].unique()))]
+            for part in statementConsideredV2['DAYPART'].unique():
+                indV2 = statementConsideredV2[statementConsideredV2['DAYPART'].values == part]['KEY'].unique()
+                cg_dur = historyConsideredV1[(historyConsideredV1['DAYPART'].values == part) &
+                                             (historyConsideredV1['KEY'].isin(indV2)) &
+                                             (historyConsideredV1['DURATION'].values != 0)].groupby(['DATE', 'KEY'])['DURATION'].sum().reset_index()
+                cg_dur = cg_dur.groupby('DATE')['DURATION'].median().tolist()
+                MAD = calcOutlierMADVer2(cg_dur, defaultBval)
+                madDict['state_group'].append(state)
+                madDict['clusters'].append(i)
+                madDict['GENRE'].append(genre)
+                madDict['DAYPART'].append(part)
+                madDict['MADOUTLIER_LV3'].append(MAD)
+                madDict['CG_DUR_LV3'].append(np.median(cg_dur))
+    return pd.DataFrame(madDict)
+
+################Clipping caliberation methods:start######################
+def extendStatement(indexCol):
+    rows = []
+    indexCount = []
+    for row in indexCol:
+        indexes = str(row).split(" ")
+        rows.extend(indexes)
+        indexCount.append(len(indexes))
+    return rows, indexCount
+
+def checkZeroDur(x):
+    return [dur for dur in x if dur%60!=0]
+
+def properClip(x, counter):
+    x[counter + 1] = x[counter] + x[counter + 1]
+    x[counter] = 0
+    #print(x, counter)
+    counter += 1
+    return x
+
+def checkClipping(x):
+    x=np.array(x, dtype='float')
+    counter = 0
+    while (checkZeroDur(x)) and (counter+1 < len(x)):
+        if (x[counter]%60==0) or (x[counter]%60>30):
+            counter += 1
+            continue
+        x = properClip(x, counter)
+    return list(np.round(pd.Series(x) / 60, decimals=0) * 60)
+
+def mergeAndCreateFinalStatement(finalStatement, statementR0):
+    rows, indexCount = extendStatement(finalStatement['OG_INDEX'])
+    finalStatement['INDEX_COUNT'] = indexCount
+    finalStatement['DURATION_DP'] = finalStatement['DURATION']
+    finalStatement['NEWDURATION_DP'] = finalStatement['NEWDURATION']
+    finalStatement['INDEX_DP'] = finalStatement['OG_INDEX']
+
+    statementExt = finalStatement.loc[finalStatement.index.repeat(pd.Series(indexCount))]
+    statementExt['RO_INDEX'] = pd.Series(rows).astype(int).to_list()
+    statementExt = pd.merge(left=statementR0,
+                            right=statementExt[['CHANNEL', 'HOUSEHOLD', 'INDIVIDUAL', 'TVSET', 'DAYPART', 'RO_INDEX', 'INDEX_DP','DURATION_DP', 'NEWDURATION_DP']],
+                            left_on=['CHANNEL', 'HOUSEHOLD', 'INDIVIDUAL', 'TVSET', 'DAYPART', 'OG_INDEX'],
+                            right_on=['CHANNEL', 'HOUSEHOLD', 'INDIVIDUAL', 'TVSET', 'DAYPART', 'RO_INDEX'], how='left')
+    statementExt['CLIP_DUR'] = (statementExt['DURATION'] / statementExt['DURATION_DP']) * (statementExt['DURATION_DP'] - statementExt['NEWDURATION_DP'])
+    statementExt['NEWDURATION'] = statementExt['DURATION'] - statementExt['CLIP_DUR']
+    #####
+    temp = statementExt[(statementExt['CLIP_DUR'] != 0) & (~statementExt['CLIP_DUR'].isna())]
+    temp['INDEX'] = statementExt[(statementExt['CLIP_DUR'] != 0) & (~statementExt['CLIP_DUR'].isna())].index
+    clipDf = pd.DataFrame({'dur': temp['DURATION'].tolist(), 'clip': temp['CLIP_DUR'].tolist()},index=temp['INDEX'].tolist())
+    temp = temp.groupby('INDEX_DP').agg(newClip=('CLIP_DUR', checkClipping), old=('CLIP_DUR', list),index=('INDEX', list)).reset_index()
+
+    for row in temp[['newClip', 'index']].iterrows():
+        durations = row[1]['newClip']
+        for ind in row[1]['index']:
+            clipDur = clipDf.loc[ind, 'dur']
+            for i, dur in enumerate(durations):
+                if clipDur >= dur:
+                    clipDur = dur
+                    durations.pop(i)
+                else:
+                    clipDur = 0
+            clipDf.loc[ind, 'clip'] = clipDur
+        if row[0] % 1000 == 0:
+            print(row[0])
+
+    statementExt.loc[clipDf.index, 'CLIP_DUR'] = clipDf['clip']
+    statementExt['NEWDURATION'] = statementExt['DURATION'] - statementExt['CLIP_DUR']
+    #####
+    statementExt = statementExt.groupby(["OG_INDEX"]).agg({'HOUSEHOLD': 'first', 'INDIVIDUAL': 'first',
+                                                           'CHANNEL': 'first', 'TVSET': 'first', 'PLATFORM': 'first', 'NEWDURATION': 'sum', 'START': 'first'}).reset_index()
+    statementExt = statementExt[['HOUSEHOLD', 'INDIVIDUAL', 'START', 'NEWDURATION', 'CHANNEL', 'TVSET', 'PLATFORM']]
+    statementExt.columns = ['HOUSEHOLD', 'INDIVIDUAL', 'START', 'DURATION', 'CHANNEL', 'TVSET', 'PLATFORM']
+    statementExt.sort_values(by=['HOUSEHOLD', 'INDIVIDUAL', 'START'], inplace=True)
+    statementExt = statementExt.astype(int)
+
+    return statementExt
+################Clipping caliberation methods:end######################
+
+def assignStochasticVer2(day, uniqueCases1, uniqueCases2, stochasticConfig, exemptChannels):
+    probList = []
+    uniqueCases1.loc[uniqueCases1['CHANNEL'].isin(exemptChannels), 'PROBABILITY'] = 1
+    uniqueCases2.loc[uniqueCases2['CHANNEL'].isin(exemptChannels), 'PROBABILITY'] = 1
+    for i, (state, tc, CHANNEL) in enumerate(zip(uniqueCases1['STATE'], uniqueCases1['detailed_town_class'], uniqueCases1['CHANNEL'])):
+        tempStoch = stochasticConfig[(stochasticConfig['STATE'].values==state) & (stochasticConfig['detailed_town_class'].values==tc)]
+        prob = tempStoch[(tempStoch['CHANNEL'].values == CHANNEL)]['PROBABILITY'].tolist()
+        prob.extend(tempStoch[(tempStoch['CHANNEL'].isna())]['PROBABILITY'].tolist())
+        prob = pd.Series(prob).sort_values()
+
+        if (len(prob)==0) and (CHANNEL in exemptChannels.tolist()):
+            probList.append(1)
+        elif len(prob)==0:
+            probList.append(np.nan)
+        else:
+            probList.append(prob[0])
+
+    uniqueCases1['PROBABILITY'] = probList
+    uniqueCases1.loc[uniqueCases1['PROBABILITY'].isna(), 'PROBABILITY'] = 0.5
+
+    probList = []
+    for i, (dp, state, CHANNEL) in enumerate(zip(uniqueCases2['DAYPART'], uniqueCases2['STATE'], uniqueCases2['CHANNEL'])):
+        tempStoch = stochasticConfig[(stochasticConfig['STATE'].values==state) & (stochasticConfig['Daypart'].values==dp)]
+        prob = tempStoch[(tempStoch['CHANNEL'].values == CHANNEL) & (tempStoch['Day'].values == day)]['PROBABILITY'].tolist()
+        prob = pd.Series(prob).sort_values()
+
+        if (len(prob)==0) and (CHANNEL in exemptChannels.tolist()):
+            probList.append(1)
+        elif len(prob)==0:
+            probList.append(np.nan)
+        else:
+            probList.append(prob[0])
+
+    uniqueCases2['PROBABILITY'] = probList
+    uniqueCases2.loc[uniqueCases2['PROBABILITY'].isna(), 'PROBABILITY'] = 0.5
+    return uniqueCases1, uniqueCases2
+
+def checkNightViewing(start, stop, duration):
+    if stop>21600:
+        return 21600-start
+    else:
+        return duration
+
+def updateNightViewing(start, stop, returnType, duration):
+    if returnType=='DUR':
+        if stop > 21600:
+            return stop - 21600
+        else:
+            return duration-7200
+    else:
+        if stop > 21600:
+            return 21600
+        else:
+            return start + 7200
+
+
+def newChannelSegStochasticMadAssign(statementFile, weekDir, currDate, channelsData):
+    print("starting stochastic & MAD assignment as per new channel segmentation.. ")
+    from pool.dataMaps import stateGroupCode, stateGroupWiseTCMapping, config, hsmStates, indiaChannels, regionChannelMapping, hsmChannels, groupedChannel
+    regionalChannels = []
+    [regionalChannels.append(channel) for channels in regionChannelMapping.values() for channel in channels]
+
+    masterStochastic = pd.read_csv("/home/niranjan.zalake/Downloads/metarules/config/Channel Segmentation/masterStochastic.csv")
+    masterStochastic = masterStochastic.drop_duplicates()
+    demo = pd.read_csv(weekDir+currDate+"/demographics.csv")
+    tamperedChannel = pd.read_excel("/home/niranjan.zalake/Downloads/metarules/config/Channel Segmentation/tamperedList_old.xlsx", sheet_name='final')
+    for col in ['Town Class']:
+        tamperedChannel[col] = tamperedChannel[col].apply(lambda x: [ele.strip() for ele in x.split(",")])
+
+    channelDict = {}
+    for clubChannel in groupedChannel.items():
+        for channel in channelsData['NAME'].unique():
+            if channel in clubChannel[1]:
+                channelDict[channel] = clubChannel[0]
+    channelsData['NAME'] = channelsData['NAME'].apply(lambda x: channelDict[x] if x in channelDict.keys() else x)
+
+    demo['KEY'] = demo['HOUSEHOLD'].astype(str) + " " + demo['INDIVIDUAL_ID'].astype(str)
+    demo['stateGroup'] = demo['state_group'].map(stateGroupCode)
+    demo['age'] = demo['Age_in_years'].apply(lambda x: "<21" if x < 21 else "21+")
+    demo['nccs'] = demo['Detailed_NCCS'].apply(lambda x: "A" if "A" in x else "B" if "B" in x else "C/D/E")
+    for state in stateGroupWiseTCMapping.items():
+        demo.loc[demo['stateGroup'] == state[0], 'tc'] = demo.loc[
+            demo['stateGroup'] == state[0], 'town_class'].map(state[1]).tolist()
+    demo['sex'] = demo['Sex'].apply(lambda x: int(x) if str(x) != 'nan' else -1)
+    demo = demo[['KEY', 'stateGroup', 'tc', 'detailed_town_class', 'age', 'sex', 'nccs']]
+
+    statementFile['channel'] = statementFile['CHANNEL'].map(dict(zip(channelsData['CHANNEL'], channelsData['NAME'])))
+    statementFile.loc[statementFile['channel'].isin(indiaChannels), 'market'] = 'INDIA'
+    statementFile.loc[statementFile['channel'].isin(hsmChannels), 'market'] = 'HSM'
+    statementFile.loc[statementFile['channel'].isin(regionalChannels), 'market'] = 'REGIONAL'
+
+    statementFile = pd.merge(left=statementFile, right=demo, how='left', on='KEY')
+    #print(len(statementFile), statementFile['DURATION'].sum())
+    statementFile['sex'] = statementFile['sex'].apply(lambda x: int(x) if str(x) != 'nan' else -1)
+
+    statementFile = pd.merge(left=statementFile, right=masterStochastic[['age', 'channel', 'dp', 'market', 'nccs', 'sex', 'stateGroup', 'tc', 'LABEL', 'stochastic', 'mad']],
+                             on=['age', 'channel', 'dp', 'market', 'nccs', 'sex', 'stateGroup', 'tc'], how='left')
+    #print(len(statementFile), statementFile['DURATION'].sum())
+    statementFile.loc[(statementFile['sex'] != -1) & (statementFile['stochastic'].isna())]['channel'].unique()
+    statementFile.loc[(statementFile['sex'] != -1) & (statementFile['stochastic'].isna()), 'LABEL'] = 'DEFAULT'
+    statementFile.loc[(statementFile['sex'] != -1) & (statementFile['stochastic'].isna()), 'stochastic'] = float(config.loc[config['label'] == 'DEFAULT', 'stochastic'])
+    statementFile.loc[(statementFile['sex'] != -1) & (statementFile['mad'].isna()), 'mad'] = float(config.loc[config['label'] == 'DEFAULT', 'mad'])
+
+    for row in tamperedChannel.iterrows():
+        #temp = statementFile[(statementFile['channel'] == row[1]['Channel']) & (statementFile['stateGroup'] == row[1]['State Group']) & (statementFile['detailed_town_class'].isin(row[1]['Town Class']))]
+        #statementFile.loc[temp.index, 'LABEL'] = 'TAMPERED'
+        #statementFile.loc[temp.index, 'stochastic'] = float(config.loc[config['label'] == 'TAMPERED', 'stochastic'])
+        #statementFile.loc[temp.index, 'mad'] = float(config.loc[config['label'] == 'TAMPERED', 'mad'])
+        temp = statementFile[(statementFile['CHANNEL'] == row[1]['Code']) & (statementFile['stateGroup'] == row[1]['State Group']) &
+            (statementFile['detailed_town_class'].isin(row[1]['Town Class']))]
+        statementFile.loc[temp.index, 'LABEL'] = 'TAMPERED'
+        statementFile.loc[temp.index, 'stochastic'] = row[1]['Probability']
+        statementFile.loc[temp.index, 'mad'] = row[1]['Bval']
+        #print(row[1]['Channel'], len(temp))
+    print("Stochastic & MAD assignment as per new channel segmentation complete.")
+    statementFile.columns = ['CHANNEL', 'HOUSEHOLD', 'INDIVIDUAL', 'TVSET', 'DAYPART', 'dp', 'DURATION', 'OG_INDEX', 'KEY', 'PLATFORM', 'START', 'END', 'channel',
+    'market', 'stateGroup', 'tc', 'detailed_town_class', 'age', 'sex', 'nccs', 'LABEL', 'PROBABILITY', 'BVAL']
+    #print(len(statementFile), statementFile['DURATION'].sum())
+    return statementFile[['CHANNEL', 'HOUSEHOLD', 'INDIVIDUAL', 'TVSET', 'DAYPART', 'DURATION',
+       'OG_INDEX', 'KEY', 'PLATFORM', 'START', 'END', 'PROBABILITY', 'BVAL']]
+
+
+def createComparison(tamperedConfigPath, channelListName, r1Path, r0Path, finalStatement, weekDir):
+    r0 = pd.read_csv(r0Path + "statement_r0.csv")
+    r1 = pd.read_csv(r1Path)
+    comparison = r0.groupby(by='CHANNEL').agg(r0_Dur=('DURATION', 'sum')).reset_index(). \
+        merge(r1.groupby(by='CHANNEL').agg(r1_Dur=('DURATION', 'sum')).reset_index(), on='CHANNEL', how='outer'). \
+        merge(finalStatement.groupby(by='CHANNEL')['DURATION'].agg(r1_Test_Dur=('DURATION', 'sum')).reset_index(),
+              on='CHANNEL', how='outer')
+
+    tampered = pd.read_csv(tamperedConfigPath)
+    channelsData = pd.read_excel(weekDir + channelListName, usecols=["Channel Codes", "Channel Name", "Genre "])
+    channelsData.columns = ['CHANNEL', 'NAME', 'GENRE']
+
+    comparison['TAMPERED'] = np.where(comparison['CHANNEL'].isin(tampered['Channel Code']), "Yes", "No")
+    comparison = pd.merge(left=comparison, right=channelsData[['CHANNEL', 'NAME', 'GENRE']], on='CHANNEL', how='left')
+
+    comparison['test_clip'] = (comparison['r1_Test_Dur'] - comparison['r0_Dur']) / comparison['r0_Dur']
+    comparison['r1_clip'] = (comparison['r1_Dur'] - comparison['r0_Dur']) / comparison['r0_Dur']
+    return comparison
